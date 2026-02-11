@@ -1,0 +1,18 @@
+# Local env / secrets
+.env
+*.env
+wallets.json
+tx-history.jsonl
+.kascov-console-history
+.kaspa-cli-console-history
+contracts/
+compiled-silverscript/
+
+# Rust build artifacts
+target/
+
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*.swo

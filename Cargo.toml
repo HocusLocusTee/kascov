@@ -1,0 +1,21 @@
+[package]
+name = "kascov"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+secp256k1 = { version = "0.29.1", features = ["global-context"] }
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+dotenvy = "0.15"
+walkdir = "2.5"
+getrandom = "0.2"
+rustyline = "14"
+kaspa-grpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
+silverscript-lang = { path = "../silverscript/silverscript-lang" }

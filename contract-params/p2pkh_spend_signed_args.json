@@ -1,0 +1,4 @@
+[
+  { "kind": "identifier", "data": "$pubkey" },
+  { "kind": "identifier", "data": "$sig" }
+]
