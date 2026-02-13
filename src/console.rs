@@ -8,7 +8,7 @@ use walkdir::WalkDir;
 use crate::commands::{
     cmd_balance, cmd_compile_contracts, cmd_compile_sil, cmd_compile_sil_with_args, cmd_compound_utxos, cmd_deploy_covenant,
     cmd_fee_estimate, cmd_pending_txs, cmd_send, cmd_spend_contract, cmd_spend_contract_signed, cmd_spend_contract_with_args,
-    cmd_spend_contract_with_args_and_outputs, cmd_submit_self, cmd_tx_status, cmd_utxos,
+    cmd_spend_contract_with_args_and_outputs, cmd_submit_self, cmd_tx_status, cmd_utxos, SpendOutputDestination,
 };
 use crate::storage::{
     cmd_history, cmd_wallets, generate_wallet_record, history_path, list_history, load_wallets, parse_testnet_address,
@@ -17,6 +17,35 @@ use crate::storage::{
 use crate::ui::{print_header, print_kv};
 
 const DEFAULT_CONSOLE_HISTORY_PATH: &str = ".kascov-console-history";
+const SOMPI_PER_KAS: u64 = 100_000_000;
+
+#[derive(Clone, Copy)]
+enum AmountUnit {
+    Sompi,
+    Kas,
+}
+
+impl AmountUnit {
+    fn from_env() -> Result<Self, String> {
+        match std::env::var("KASPA_AMOUNT_UNIT") {
+            Ok(raw) => match raw.trim().to_ascii_uppercase().as_str() {
+                "" | "SOMPI" => Ok(Self::Sompi),
+                "KAS" => Ok(Self::Kas),
+                other => Err(format!(
+                    "invalid KASPA_AMOUNT_UNIT '{other}', expected 'SOMPI' or 'KAS'"
+                )),
+            },
+            Err(_) => Ok(Self::Sompi),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sompi => "sompi",
+            Self::Kas => "kas",
+        }
+    }
+}
 
 fn print_console_help() {
     println!("commands:");
@@ -31,19 +60,16 @@ fn print_console_help() {
     println!("  tx-status <txid|b|last>");
     println!("  contracts [-h]");
     println!("  compile [-h]");
-    println!("  compile -i");
-    println!("  compile -i <source.sil> [out.json]");
-    println!("  compile all [contracts_dir] [compiled_dir]");
+    println!("    compile -i");
+    println!("    compile -i <source.sil> [out.json]");
+    println!("    compile all [contracts_dir] [compiled_dir]");
     println!("  deploy [-h]");
-    println!("  deploy -i");
-    println!("  spend-contract <compiled.json> <txid:vout> <input_amount_sompi> <function> <args.json|-> <outputs.json>");
-    println!("  spend-contract -i");
-    println!("  spend-contract -i <compiled.json> <txid:vout> <input_amount_sompi> <function> <outputs.json>");
-    println!("  spend-contract-signed <compiled.json> <txid:vout> <input_amount_sompi> <function> <args.json> <outputs.json>");
+    println!("    deploy -i");
+    println!("  spend-contract <compiled.json> <txid:vout> <input_amount> <function> <args.json|-> <outputs.json>");
+    println!("    spend-contract -i");
+    println!("    spend-contract -i <compiled.json> <txid:vout> <input_amount> <function> <outputs.json>");
+    println!("    spend-contract-signed <compiled.json> <txid:vout> <input_amount> <function> <args.json> <outputs.json>");
     println!("  send [-h]");
-    println!("  send <to_address> <amount_sompi>");
-    println!("  send -s <amount_sompi>");
-    println!("  send -c [max_inputs]");
     println!("  history [limit]");
     println!("  back");
     println!("  quit | exit");
@@ -113,20 +139,22 @@ fn print_deploy_help() {
     println!("usage: deploy -i");
     println!("  same as `deploy`; explicit interactive mode");
     println!();
-    println!("usage: deploy <compiled.json> <amount_sompi>");
+    println!("usage: deploy <compiled.json> <amount>");
     println!("  deploy compiled contract and lock amount into P2SH covenant output");
+    println!("  amount unit is controlled by KASPA_AMOUNT_UNIT (SOMPI default, or KAS)");
     println!("example: deploy contracts/compiled/openhashlock.json 1000000000");
 }
 
 fn print_send_help() {
-    println!("usage: send <to_address> <amount_sompi>");
+    println!("usage: send <to_address> <amount>");
     println!("  send funds to another testnet address");
     println!();
-    println!("usage: send -s <amount_sompi>");
+    println!("usage: send -s <amount>");
     println!("  self-send: send from active wallet back to the same address");
     println!();
     println!("usage: send -c [max_inputs]");
     println!("  compound UTXOs: consolidate many UTXOs into one output on same address");
+    println!("  amount unit is controlled by KASPA_AMOUNT_UNIT (SOMPI default, or KAS)");
     println!();
     println!("example: send kaspatest:qp... 250000000");
     println!("example: send -s 100000000");
@@ -134,22 +162,24 @@ fn print_send_help() {
 }
 
 fn print_spend_contract_help() {
-    println!("usage: spend-contract <compiled.json> <txid:vout> <input_amount_sompi> <function> <args.json|-> <outputs.json>");
+    println!("usage: spend-contract <compiled.json> <txid:vout> <input_amount> <function> <args.json|-> <outputs.json>");
     println!("  spend a deployed contract UTXO using args JSON (or `-` for no args)");
     println!();
     println!("usage: spend-contract -i");
     println!("  guided spend flow: pick contract, outpoint, amount, function, args, and outputs interactively");
     println!();
-    println!("usage: spend-contract -i <compiled.json> <txid:vout> <input_amount_sompi> <function> <outputs.json>");
+    println!("usage: spend-contract -i <compiled.json> <txid:vout> <input_amount> <function> <outputs.json>");
     println!("  spend a deployed contract UTXO and enter function args interactively");
     println!();
     println!("notes:");
-    println!("  - replace placeholders like <txid:vout> and <input_amount_sompi> with real values");
+    println!("  - replace placeholders like <txid:vout> and <input_amount> with real values");
     println!("  - outpoint accepts alias `last` (most recent deploy contract outpoint from history)");
-    println!("  - input_amount_sompi must match the spent outpoint amount exactly");
-    println!("  - outputs total must be <= input_amount_sompi (fee = input - outputs)");
+    println!("  - input_amount must match the spent outpoint amount exactly");
+    println!("  - outputs total must be <= input_amount (fee = input - outputs)");
+    println!("  - outputs.json supports destination via `address` or `locking_bytecode_hex`");
     println!("  - in guided mode, output address accepts `self` and one output amount can be `all`/`max`");
     println!("  - in guided mode, if fee is too low, shortfall auto-deducts from the last output");
+    println!("  - amount unit is controlled by KASPA_AMOUNT_UNIT (SOMPI default, or KAS)");
     println!();
     println!(
         "example: spend-contract -i contracts/compiled/openhashlock.json <txid:vout> 1000000000 claim contracts/params/openhashlock_outputs.json"
@@ -323,13 +353,75 @@ fn prompt_for_typed_args(params: &[(String, String)], context: &str) -> Result<O
     Ok(Some(args))
 }
 
-fn parse_u64_cli_arg(arg_name: &str, raw: &str) -> Result<u64, String> {
+fn parse_kas_to_sompi(raw: &str) -> Result<u64, String> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err("amount is empty".to_string());
+    }
+    if text.starts_with('-') {
+        return Err("amount cannot be negative".to_string());
+    }
+    if text.matches('.').count() > 1 {
+        return Err("invalid KAS amount: too many decimal points".to_string());
+    }
+
+    let mut parts = text.split('.');
+    let whole_part = parts.next().unwrap_or("");
+    let frac_part = parts.next().unwrap_or("");
+    if parts.next().is_some() {
+        return Err("invalid KAS amount".to_string());
+    }
+    if whole_part.is_empty() && frac_part.is_empty() {
+        return Err("amount is empty".to_string());
+    }
+    if !whole_part.is_empty() && !whole_part.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("invalid KAS amount: whole part must be digits".to_string());
+    }
+    if !frac_part.is_empty() && !frac_part.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("invalid KAS amount: fractional part must be digits".to_string());
+    }
+    if frac_part.len() > 8 {
+        return Err("invalid KAS amount: max 8 decimal places".to_string());
+    }
+
+    let whole = if whole_part.is_empty() {
+        0u64
+    } else {
+        whole_part
+            .parse::<u64>()
+            .map_err(|err| format!("invalid KAS amount whole part: {err}"))?
+    };
+    let mut frac_scaled = 0u64;
+    if !frac_part.is_empty() {
+        let frac = frac_part
+            .parse::<u64>()
+            .map_err(|err| format!("invalid KAS amount fractional part: {err}"))?;
+        let scale = 10u64
+            .checked_pow((8 - frac_part.len()) as u32)
+            .ok_or_else(|| "invalid KAS scale".to_string())?;
+        frac_scaled = frac
+            .checked_mul(scale)
+            .ok_or_else(|| "KAS amount overflow".to_string())?;
+    }
+
+    let whole_sompi = whole
+        .checked_mul(SOMPI_PER_KAS)
+        .ok_or_else(|| "KAS amount overflow".to_string())?;
+    whole_sompi
+        .checked_add(frac_scaled)
+        .ok_or_else(|| "KAS amount overflow".to_string())
+}
+
+fn parse_amount_cli_arg(arg_name: &str, raw: &str, unit: AmountUnit) -> Result<u64, String> {
     if raw.contains('<') || raw.contains('>') {
         return Err(format!(
             "{arg_name} looks like a placeholder (`{raw}`); replace it with a real numeric value"
         ));
     }
-    raw.parse::<u64>().map_err(|err| format!("invalid {arg_name}: {err}"))
+    match unit {
+        AmountUnit::Sompi => raw.parse::<u64>().map_err(|err| format!("invalid {arg_name} sompi: {err}")),
+        AmountUnit::Kas => parse_kas_to_sompi(raw).map_err(|err| format!("invalid {arg_name} kas: {err}")),
+    }
 }
 
 fn log_tx_failure(action: &str, rpc: &str, address: &str, details: String, err: &str) {
@@ -400,12 +492,12 @@ fn prompt_outpoint_interactive() -> Result<Option<String>, String> {
     Ok(Some(value))
 }
 
-fn prompt_amount_interactive() -> Result<Option<u64>, String> {
-    let value = read_prompt_line("input_amount_sompi (q to cancel)> ")?;
+fn prompt_amount_interactive(unit: AmountUnit) -> Result<Option<u64>, String> {
+    let value = read_prompt_line(&format!("input_amount_{} (q to cancel)> ", unit.label()))?;
     if is_cancel_input(&value) {
         return Ok(None);
     }
-    let parsed = parse_u64_cli_arg("input_amount_sompi", &value)?;
+    let parsed = parse_amount_cli_arg("input_amount", &value, unit)?;
     Ok(Some(parsed))
 }
 
@@ -428,7 +520,10 @@ fn prompt_function_selection(compiled: &CompiledContract) -> Result<Option<Strin
     Ok(Some(compiled.abi[index - 1].name.clone()))
 }
 
-fn prompt_outputs_interactive(self_address: &str) -> Result<Option<Vec<(String, Option<u64>)>>, String> {
+fn prompt_outputs_interactive(
+    self_address: &str,
+    unit: AmountUnit,
+) -> Result<Option<Vec<(SpendOutputDestination, Option<u64>)>>, String> {
     print_header("Spend Outputs");
     println!("add destination outputs; type `done` when finished, `q` to cancel");
     println!("address alias: `self` = current wallet address");
@@ -457,7 +552,7 @@ fn prompt_outputs_interactive(self_address: &str) -> Result<Option<Vec<(String, 
         }
 
         loop {
-            let amount_text = read_prompt_line(&format!("output[{output_index}] amount_sompi> "))?;
+            let amount_text = read_prompt_line(&format!("output[{output_index}] amount_{}> ", unit.label()))?;
             if is_cancel_input(&amount_text) {
                 return Ok(None);
             }
@@ -469,11 +564,11 @@ fn prompt_outputs_interactive(self_address: &str) -> Result<Option<Vec<(String, 
                     println!("error: only one output can use `all`/`max`");
                     continue;
                 }
-                outputs.push((address.clone(), None));
+                outputs.push((SpendOutputDestination::Address(address.clone()), None));
                 used_all = true;
                 break;
             }
-            let amount = match parse_u64_cli_arg("amount_sompi", &amount_text) {
+            let amount = match parse_amount_cli_arg("amount", &amount_text, unit) {
                 Ok(value) => value,
                 Err(err) => {
                     println!("error: {err}");
@@ -481,17 +576,17 @@ fn prompt_outputs_interactive(self_address: &str) -> Result<Option<Vec<(String, 
                 }
             };
             if amount == 0 {
-                println!("error: amount_sompi must be greater than 0");
+                println!("error: amount must be greater than 0");
                 continue;
             }
-            outputs.push((address.clone(), Some(amount)));
+            outputs.push((SpendOutputDestination::Address(address.clone()), Some(amount)));
             break;
         }
     }
     Ok(Some(outputs))
 }
 
-async fn cmd_spend_contract_wizard(rpc: &str, out_dir: &str, self_address: &str) -> Result<(), String> {
+async fn cmd_spend_contract_wizard(rpc: &str, out_dir: &str, self_address: &str, amount_unit: AmountUnit) -> Result<(), String> {
     let files = list_compiled_json_files(out_dir)?;
     if files.is_empty() {
         return Err(format!("no compiled contract json files found in {out_dir}"));
@@ -522,7 +617,7 @@ async fn cmd_spend_contract_wizard(rpc: &str, out_dir: &str, self_address: &str)
         println!("spend cancelled");
         return Ok(());
     };
-    let Some(input_amount_sompi) = prompt_amount_interactive()? else {
+    let Some(input_amount_sompi) = prompt_amount_interactive(amount_unit)? else {
         println!("spend cancelled");
         return Ok(());
     };
@@ -544,7 +639,7 @@ async fn cmd_spend_contract_wizard(rpc: &str, out_dir: &str, self_address: &str)
         println!("spend cancelled");
         return Ok(());
     };
-    let Some(outputs) = prompt_outputs_interactive(self_address)? else {
+    let Some(outputs) = prompt_outputs_interactive(self_address, amount_unit)? else {
         println!("spend cancelled");
         return Ok(());
     };
@@ -734,6 +829,7 @@ async fn cmd_deploy_browse(
     private_key: &str,
     address: &str,
     out_dir: &str,
+    amount_unit: AmountUnit,
 ) -> Result<(), String> {
     let files = list_compiled_json_files(out_dir)?;
     if files.is_empty() {
@@ -758,10 +854,8 @@ async fn cmd_deploy_browse(
     }
     let file = &files[index - 1];
 
-    let amount_text = read_prompt_line("amount_sompi> ")?;
-    let amount = amount_text
-        .parse::<u64>()
-        .map_err(|err| format!("invalid amount_sompi '{amount_text}': {err}"))?;
+    let amount_text = read_prompt_line(&format!("amount_{}> ", amount_unit.label()))?;
+    let amount = parse_amount_cli_arg("amount", &amount_text, amount_unit)?;
 
     cmd_deploy_covenant(rpc, private_key, address, &file.to_string_lossy(), amount).await
 }
@@ -863,6 +957,7 @@ pub async fn cmd_console(
     mut contracts_dir: String,
     mut out_dir: String,
 ) -> Result<(), String> {
+    let amount_unit = AmountUnit::from_env()?;
     println!("kascov console started");
     let Some((mut selected_wallet_name, mut selected_wallet_address)) =
         select_wallet_on_console_boot(&mut private_key, &mut address)?
@@ -873,6 +968,7 @@ pub async fn cmd_console(
     clear_terminal()?;
     println!("kascov console started");
     println!("selected wallet name={} address={}", selected_wallet_name, selected_wallet_address);
+    println!("amount_unit={} (set KASPA_AMOUNT_UNIT=SOMPI|KAS)", amount_unit.label());
     println!("type 'help' for commands");
     let mut line_editor = rustyline::DefaultEditor::new().map_err(|err| format!("console init failed: {err}"))?;
     let history_file =
@@ -949,6 +1045,7 @@ pub async fn cmd_console(
                     println!("rpc={rpc}");
                     println!("address={address}");
                     println!("selected_wallet_name={selected_wallet_name}");
+                    println!("amount_unit={} (KASPA_AMOUNT_UNIT)", amount_unit.label());
                     println!("contracts_dir={contracts_dir}");
                     println!("compiled_dir={out_dir}");
                     println!("history_file={}", history_path());
@@ -1232,7 +1329,7 @@ pub async fn cmd_console(
                     continue;
                 }
                 if parts.len() == 1 || (parts.len() == 2 && parts[1] == "-i") {
-                    if let Err(err) = cmd_deploy_browse(&rpc, &private_key, &address, &out_dir).await {
+                    if let Err(err) = cmd_deploy_browse(&rpc, &private_key, &address, &out_dir, amount_unit).await {
                         println!("error: {err}");
                     }
                     continue;
@@ -1241,10 +1338,10 @@ pub async fn cmd_console(
                     print_deploy_help();
                     continue;
                 }
-                let amount_sompi = match parts[2].parse::<u64>() {
+                let amount_sompi = match parse_amount_cli_arg("amount", parts[2], amount_unit) {
                     Ok(value) => value,
                     Err(err) => {
-                        println!("error: invalid amount_sompi: {err}");
+                        println!("error: {err}");
                         continue;
                     }
                 };
@@ -1266,14 +1363,14 @@ pub async fn cmd_console(
                     continue;
                 }
                 if parts.len() == 2 && parts[1] == "-i" {
-                    if let Err(err) = cmd_spend_contract_wizard(&rpc, &out_dir, &address).await {
+                    if let Err(err) = cmd_spend_contract_wizard(&rpc, &out_dir, &address, amount_unit).await {
                         log_tx_failure("spend-contract", &rpc, "contract-p2sh", "wizard=true".to_string(), &err);
                         println!("error: {err}");
                     }
                     continue;
                 }
                 if parts.len() == 7 && parts[1] == "-i" {
-                    let input_amount_sompi = match parse_u64_cli_arg("input_amount_sompi", parts[4]) {
+                    let input_amount_sompi = match parse_amount_cli_arg("input_amount", parts[4], amount_unit) {
                         Ok(value) => value,
                         Err(err) => {
                             println!("error: {err}");
@@ -1352,7 +1449,7 @@ pub async fn cmd_console(
                     print_spend_contract_help();
                     continue;
                 }
-                let input_amount_sompi = match parse_u64_cli_arg("input_amount_sompi", parts[3]) {
+                let input_amount_sompi = match parse_amount_cli_arg("input_amount", parts[3], amount_unit) {
                     Ok(value) => value,
                     Err(err) => {
                         println!("error: {err}");
@@ -1394,12 +1491,12 @@ pub async fn cmd_console(
             "spend-contract-signed" => {
                 if parts.len() != 7 {
                     println!(
-                        "usage: spend-contract-signed <compiled.json> <txid:vout> <input_amount_sompi> <function> <args.json> <outputs.json>"
+                        "usage: spend-contract-signed <compiled.json> <txid:vout> <input_amount> <function> <args.json> <outputs.json>"
                     );
                     println!("note: args.json can use placeholders $pubkey and $sig");
                     continue;
                 }
-                let input_amount_sompi = match parse_u64_cli_arg("input_amount_sompi", parts[3]) {
+                let input_amount_sompi = match parse_amount_cli_arg("input_amount", parts[3], amount_unit) {
                     Ok(value) => value,
                     Err(err) => {
                         println!("error: {err}");
@@ -1449,10 +1546,10 @@ pub async fn cmd_console(
                         print_send_help();
                         continue;
                     }
-                    let amount_sompi = match parts[2].parse::<u64>() {
+                    let amount_sompi = match parse_amount_cli_arg("amount", parts[2], amount_unit) {
                         Ok(value) => value,
                         Err(err) => {
-                            println!("error: invalid amount_sompi: {err}");
+                            println!("error: {err}");
                             continue;
                         }
                     };
@@ -1501,10 +1598,10 @@ pub async fn cmd_console(
                     continue;
                 }
                 let to_address = parts[1];
-                let amount_sompi = match parts[2].parse::<u64>() {
+                let amount_sompi = match parse_amount_cli_arg("amount", parts[2], amount_unit) {
                     Ok(value) => value,
                     Err(err) => {
-                        println!("error: invalid amount_sompi: {err}");
+                        println!("error: {err}");
                         continue;
                     }
                 };

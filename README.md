@@ -21,7 +21,12 @@ Create `kascov/.env`:
 
 ```bash
 KASPA_RPC=XXX.XXX.XXX.XXX:PORT
+KASPA_AMOUNT_UNIT=SOMPI
 ```
+
+`KASPA_AMOUNT_UNIT` controls how CLI/submission amount inputs are interpreted:
+- `SOMPI` (default if unset)
+- `KAS` (accepts decimals up to 8 places, e.g. `1.25`)
 
 Safety: only `kaspatest:` addresses are allowed. `kaspa:` (mainnet) and other prefixes are rejected.
 
@@ -56,14 +61,14 @@ Inside console, run `help` and use:
 - `compile all [contracts_dir] [compiled_dir]` (defaults: `contracts/silverscript` -> `contracts/compiled`; auto-loads constructor args from `contracts/params/<name>_ctor.json` or `contracts/params/<name>.json` when present)
 - `deploy` (interactive picker from compiled dir + amount prompt)
 - `deploy -i` (same as `deploy`; explicit interactive mode)
-- `deploy <compiled.json> <amount_sompi>`
-- `spend-contract <compiled.json> <txid:vout> <input_amount_sompi> <function> <args.json|-> <outputs.json>`
+- `deploy <compiled.json> <amount>`
+- `spend-contract <compiled.json> <txid:vout> <input_amount> <function> <args.json|-> <outputs.json>`
 - `spend-contract -i` (fully guided spend flow: contract selection, outpoint, amount, function, args, outputs; supports `self` address alias and one `all` amount)
-- `spend-contract -i <compiled.json> <txid:vout> <input_amount_sompi> <function> <outputs.json>` (interactive ABI-typed function args prompt)
-- `spend-contract-signed <compiled.json> <txid:vout> <input_amount_sompi> <function> <args.json> <outputs.json>`
+- `spend-contract -i <compiled.json> <txid:vout> <input_amount> <function> <outputs.json>` (interactive ABI-typed function args prompt)
+- `spend-contract-signed <compiled.json> <txid:vout> <input_amount> <function> <args.json> <outputs.json>`
 - `send -h` (show send options)
-- `send <to_address> <amount_sompi>`
-- `send -s <amount_sompi>` (self-send)
+- `send <to_address> <amount>`
+- `send -s <amount>` (self-send)
 - `send -c [max_inputs]` (compound UTXOs)
 - `history [limit]`
 - `back` (return to wallet selection)
@@ -91,6 +96,14 @@ Per-command help:
   { "address": "kaspatest:...", "amount_sompi": 99000000 }
 ]
 ```
+- For covenant/stateful outputs, you can use raw locking script destination instead of address:
+```json
+[
+  { "locking_bytecode_hex": "20...ac", "amount_sompi": 99000000 }
+]
+```
+- Each output row must provide exactly one destination: `address` or `locking_bytecode_hex`.
+- You can also use `{ "address": "...", "amount": "..." }`; `amount` is parsed using `KASPA_AMOUNT_UNIT` (`SOMPI` default, or `KAS`).
 - `input_amount_sompi - sum(outputs.amount_sompi)` becomes tx fee.
 - `spend-contract-signed` supports placeholders in `args.json`:
   - `{ "kind": "identifier", "data": "$pubkey" }`
@@ -101,14 +114,14 @@ Per-command help:
 
 Use the same model for every covenant spend:
 1. Compile contract (`compiled.json`).
-2. Deploy contract with amount (`deploy ... <amount_sompi>`), which creates a locked contract UTXO.
+2. Deploy contract with amount (`deploy ... <amount>`), which creates a locked contract UTXO.
 3. Copy deploy output `contract_output_outpoint` (`txid:vout`).
 4. Spend that exact outpoint with a contract function call and outputs.
 
 `spend-contract` argument mapping:
 - `<compiled.json>`: contract bytecode + ABI metadata.
 - `<txid:vout>`: deployed contract UTXO to spend.
-- `<input_amount_sompi>`: amount of that UTXO.
+- `<input_amount>`: amount of that UTXO (parsed via `KASPA_AMOUNT_UNIT`).
 - `<function>`: entrypoint to execute.
 - `<args.json|->`: function arguments used to satisfy lock conditions.
 - `<outputs.json>`: transaction outputs (where unlocked funds go).
@@ -156,7 +169,7 @@ Default workspace under `kascov/contracts/`:
 - Transaction-building commands use RPC fee estimate `priority_bucket` (fastest inclusion target): `send`, `send -s`, `send -c`, `deploy`, `spend-contract`, and `spend-contract-signed`.
 - `fees` prints current priority/normal/low feerate buckets from RPC.
 - `spend-contract` / `spend-contract-signed` enforce a minimum recommended fee for fastest policy; if outputs imply a lower fee, command returns an error and asks you to lower outputs total.
-- `.env` only controls RPC and fee overrides; wallet keys/addresses are selected in-console or via CLI flags.
+- `.env` controls RPC and amount input unit (`KASPA_AMOUNT_UNIT`); wallet keys/addresses are selected in-console or via CLI flags.
 - `--rpc` accepts `host:port` or `grpc://host:port`.
 - `deploy` output includes `contract_address` (derived P2SH testnet address) and `contract_output_outpoint`.
 - On startup, `kascov` ensures `contracts/silverscript/`, `contracts/compiled/`, and `contracts/params/` exist (or custom `--contracts-dir` / `--out-dir` for source/compiled paths).

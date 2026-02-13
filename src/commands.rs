@@ -4,7 +4,7 @@ use kaspa_consensus_core::{
     hashing::sighash_type::SIG_HASH_ALL,
     sign::sign,
     subnets::SUBNETWORK_ID_NATIVE,
-    tx::{MutableTransaction, Transaction, TransactionId, TransactionInput, TransactionOutpoint, TransactionOutput, UtxoEntry},
+    tx::{MutableTransaction, ScriptPublicKey, Transaction, TransactionId, TransactionInput, TransactionOutpoint, TransactionOutput, UtxoEntry},
 };
 use kaspa_grpc_client::GrpcClient;
 use kaspa_rpc_core::{api::rpc::RpcApi, notify::mode::NotificationMode};
@@ -26,10 +26,125 @@ use walkdir::WalkDir;
 use crate::storage::{parse_testnet_address, save_tx_history};
 use crate::ui::{print_header, print_kv};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 struct SpendOutputSpec {
-    address: String,
+    destination: SpendOutputDestination,
     amount_sompi: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SpendOutputSpecInput {
+    address: Option<String>,
+    locking_bytecode_hex: Option<String>,
+    amount_sompi: Option<u64>,
+    amount: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum SpendOutputDestination {
+    Address(String),
+    LockingBytecodeHex(String),
+}
+
+#[derive(Clone, Copy)]
+enum AmountUnit {
+    Sompi,
+    Kas,
+}
+
+impl AmountUnit {
+    fn from_env() -> Result<Self, String> {
+        match std::env::var("KASPA_AMOUNT_UNIT") {
+            Ok(raw) => match raw.trim().to_ascii_uppercase().as_str() {
+                "" | "SOMPI" => Ok(Self::Sompi),
+                "KAS" => Ok(Self::Kas),
+                other => Err(format!(
+                    "invalid KASPA_AMOUNT_UNIT '{other}', expected 'SOMPI' or 'KAS'"
+                )),
+            },
+            Err(_) => Ok(Self::Sompi),
+        }
+    }
+}
+
+fn parse_kas_to_sompi(raw: &str) -> Result<u64, String> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err("amount is empty".to_string());
+    }
+    if text.starts_with('-') {
+        return Err("amount cannot be negative".to_string());
+    }
+    if text.matches('.').count() > 1 {
+        return Err("invalid KAS amount: too many decimal points".to_string());
+    }
+
+    let mut parts = text.split('.');
+    let whole_part = parts.next().unwrap_or("");
+    let frac_part = parts.next().unwrap_or("");
+    if parts.next().is_some() {
+        return Err("invalid KAS amount".to_string());
+    }
+    if whole_part.is_empty() && frac_part.is_empty() {
+        return Err("amount is empty".to_string());
+    }
+    if !whole_part.is_empty() && !whole_part.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("invalid KAS amount: whole part must be digits".to_string());
+    }
+    if !frac_part.is_empty() && !frac_part.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("invalid KAS amount: fractional part must be digits".to_string());
+    }
+    if frac_part.len() > 8 {
+        return Err("invalid KAS amount: max 8 decimal places".to_string());
+    }
+
+    let whole = if whole_part.is_empty() {
+        0u64
+    } else {
+        whole_part
+            .parse::<u64>()
+            .map_err(|err| format!("invalid KAS amount whole part: {err}"))?
+    };
+    let mut frac_scaled = 0u64;
+    if !frac_part.is_empty() {
+        let frac = frac_part
+            .parse::<u64>()
+            .map_err(|err| format!("invalid KAS amount fractional part: {err}"))?;
+        let scale = 10u64
+            .checked_pow((8 - frac_part.len()) as u32)
+            .ok_or_else(|| "invalid KAS scale".to_string())?;
+        frac_scaled = frac
+            .checked_mul(scale)
+            .ok_or_else(|| "KAS amount overflow".to_string())?;
+    }
+
+    let whole_sompi = whole
+        .checked_mul(100_000_000)
+        .ok_or_else(|| "KAS amount overflow".to_string())?;
+    whole_sompi
+        .checked_add(frac_scaled)
+        .ok_or_else(|| "KAS amount overflow".to_string())
+}
+
+fn decode_hex_bytes(input: &str) -> Result<Vec<u8>, String> {
+    let normalized = input
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '_')
+        .collect::<String>();
+    let hex = normalized.strip_prefix("0x").unwrap_or(&normalized);
+    if hex.is_empty() {
+        return Err("hex is empty".to_string());
+    }
+    if hex.len() % 2 != 0 {
+        return Err("hex must have even length".to_string());
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for i in (0..hex.len()).step_by(2) {
+        let byte = u8::from_str_radix(&hex[i..i + 2], 16).map_err(|err| format!("invalid hex at byte {}: {err}", i / 2))?;
+        out.push(byte);
+    }
+    Ok(out)
 }
 
 pub fn cmd_compile_sil(source: &str, out: Option<&str>, constructor_args_path: Option<&str>) -> Result<(), String> {
@@ -595,8 +710,51 @@ fn load_function_args(function_args_path: &str) -> Result<Vec<Expr>, String> {
 
 fn load_spend_outputs(outputs_path: &str) -> Result<Vec<SpendOutputSpec>, String> {
     let outputs_json = fs::read_to_string(outputs_path).map_err(|err| format!("failed to read outputs file {outputs_path}: {err}"))?;
-    let outputs_spec = serde_json::from_str::<Vec<SpendOutputSpec>>(&outputs_json)
+    let output_rows = serde_json::from_str::<Vec<SpendOutputSpecInput>>(&outputs_json)
         .map_err(|err| format!("failed to parse outputs file {outputs_path}: {err}"))?;
+    let amount_unit = AmountUnit::from_env()?;
+    let mut outputs_spec = Vec::with_capacity(output_rows.len());
+    for (index, row) in output_rows.into_iter().enumerate() {
+        let destination = match (row.address, row.locking_bytecode_hex) {
+            (Some(address), None) => SpendOutputDestination::Address(address),
+            (None, Some(locking_bytecode_hex)) => SpendOutputDestination::LockingBytecodeHex(locking_bytecode_hex),
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "outputs[{index}] has both address and locking_bytecode_hex; keep exactly one destination"
+                ))
+            }
+            (None, None) => {
+                return Err(format!(
+                    "outputs[{index}] missing destination (use address or locking_bytecode_hex)"
+                ))
+            }
+        };
+        let amount_sompi = match (row.amount_sompi, row.amount.as_deref()) {
+            (Some(sompi), None) => sompi,
+            (None, Some(amount_text)) => match amount_unit {
+                AmountUnit::Sompi => amount_text
+                    .parse::<u64>()
+                    .map_err(|err| format!("outputs[{index}] invalid amount sompi: {err}"))?,
+                AmountUnit::Kas => {
+                    parse_kas_to_sompi(amount_text).map_err(|err| format!("outputs[{index}] invalid amount kas: {err}"))?
+                }
+            },
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "outputs[{index}] has both amount_sompi and amount; keep exactly one"
+                ))
+            }
+            (None, None) => {
+                return Err(format!(
+                    "outputs[{index}] missing amount field (use amount_sompi or amount)"
+                ))
+            }
+        };
+        outputs_spec.push(SpendOutputSpec {
+            destination,
+            amount_sompi,
+        });
+    }
     if outputs_spec.is_empty() {
         return Err("outputs file must contain at least one output".to_string());
     }
@@ -607,16 +765,30 @@ fn build_spend_outputs(spec: Vec<SpendOutputSpec>) -> Result<(Vec<TransactionOut
     let mut total_outputs = 0u64;
     let mut outputs = Vec::with_capacity(spec.len());
     for item in spec {
-        let address = parse_testnet_address(&item.address)?;
         total_outputs = total_outputs.saturating_add(item.amount_sompi);
-        outputs.push(TransactionOutput::new(item.amount_sompi, pay_to_address_script(&address)));
+        let spk = match item.destination {
+            SpendOutputDestination::Address(address) => {
+                let parsed = parse_testnet_address(&address)?;
+                pay_to_address_script(&parsed)
+            }
+            SpendOutputDestination::LockingBytecodeHex(locking_bytecode_hex) => {
+                let script = decode_hex_bytes(&locking_bytecode_hex)?;
+                ScriptPublicKey::from_vec(0, script)
+            }
+        };
+        outputs.push(TransactionOutput::new(item.amount_sompi, spk));
     }
     Ok((outputs, total_outputs))
 }
 
 fn summarize_spend_outputs(spec: &[SpendOutputSpec]) -> String {
     spec.iter()
-        .map(|item| format!("{}:{}", item.address, item.amount_sompi))
+        .map(|item| match &item.destination {
+            SpendOutputDestination::Address(address) => format!("address={address}:{}", item.amount_sompi),
+            SpendOutputDestination::LockingBytecodeHex(locking_bytecode_hex) => {
+                format!("locking_bytecode_hex={locking_bytecode_hex}:{}", item.amount_sompi)
+            }
+        })
         .collect::<Vec<_>>()
         .join("|")
 }
@@ -689,7 +861,7 @@ pub async fn cmd_spend_contract_with_args(
 ) -> Result<(), String> {
     let outputs_spec = load_spend_outputs(outputs_path)?
         .into_iter()
-        .map(|item| (item.address, Some(item.amount_sompi)))
+        .map(|item| (item.destination, Some(item.amount_sompi)))
         .collect::<Vec<_>>();
     cmd_spend_contract_with_args_and_outputs(
         rpc,
@@ -712,7 +884,7 @@ pub async fn cmd_spend_contract_with_args_and_outputs(
     input_amount_sompi: u64,
     function_name: &str,
     function_args: Vec<Expr>,
-    outputs_spec: Vec<(String, Option<u64>)>,
+    outputs_spec: Vec<(SpendOutputDestination, Option<u64>)>,
     function_args_label: &str,
     outputs_label: &str,
 ) -> Result<(), String> {
@@ -759,13 +931,13 @@ pub async fn cmd_spend_contract_with_args_and_outputs(
                     .to_string(),
             );
         }
-        for (index, (address, amount)) in outputs_spec.into_iter().enumerate() {
+        for (index, (destination, amount)) in outputs_spec.into_iter().enumerate() {
             let resolved_amount = if index == all_idx {
                 all_amount
             } else {
                 amount.unwrap_or(0)
             };
-            resolved_outputs.push((address, resolved_amount));
+            resolved_outputs.push((destination, resolved_amount));
         }
         recommended_fee_sompi
     } else {
@@ -774,8 +946,8 @@ pub async fn cmd_spend_contract_with_args_and_outputs(
                 "outputs exceed input amount: outputs_total_sompi={explicit_total} input_amount_sompi={input_amount_sompi}"
             ));
         }
-        for (address, amount) in outputs_spec {
-            resolved_outputs.push((address, amount.unwrap_or(0)));
+        for (destination, amount) in outputs_spec {
+            resolved_outputs.push((destination, amount.unwrap_or(0)));
         }
         let implied_fee = input_amount_sompi - explicit_total;
         if implied_fee < recommended_fee_sompi {
@@ -805,7 +977,7 @@ pub async fn cmd_spend_contract_with_args_and_outputs(
 
     let outputs_spec = resolved_outputs
         .into_iter()
-        .map(|(address, amount_sompi)| SpendOutputSpec { address, amount_sompi })
+        .map(|(destination, amount_sompi)| SpendOutputSpec { destination, amount_sompi })
         .collect::<Vec<_>>();
     let outputs_summary = summarize_spend_outputs(&outputs_spec);
     let (outputs, total_outputs) = build_spend_outputs(outputs_spec)?;
