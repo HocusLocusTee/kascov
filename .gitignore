@@ -5,8 +5,10 @@ wallets.json
 tx-history.jsonl
 .kascov-console-history
 .kaspa-cli-console-history
-contracts/
-compiled-silverscript/
+contracts/compiled/*
+!contracts/compiled/.gitkeep
+contracts/params/*
+!contracts/params/.gitkeep
 
 # Rust build artifacts
 target/

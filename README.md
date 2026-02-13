@@ -1,7 +1,8 @@
 # kascov (console-only)
 
-This app now runs as a single interactive console session.
-Direct subcommand usage was removed by design.
+Codex coded CLI App to interact with kas covenants testnet.
+
+**Warning: Do not use or modify for use on mainnet or real funds.**
 
 ## Start
 
@@ -11,19 +12,15 @@ From `kascov/`:
 cargo run
 ```
 
-Optional startup overrides:
+Dependencies are pulled via Cargo from git (including `silverscript-lang`), so cloning `kascov/` alone is enough.
 
-```bash
-cargo run -- --rpc 66.23.234.250:16210 --address kaspatest:qp8snfastxwvcu40sy7sfwwad0kpkjt2flcdkuuk4gw2td0mcauukn2pq66m6
-```
 
 ## `.env` configuration
 
 Create `kascov/.env`:
 
 ```bash
-KASPA_RPC=66.23.234.250:16210
-KASPA_FEE_SOMPI=1000000
+KASPA_RPC=XXX.XXX.XXX.XXX:PORT
 ```
 
 Safety: only `kaspatest:` addresses are allowed. `kaspa:` (mainnet) and other prefixes are rejected.
@@ -33,31 +30,53 @@ Safety: only `kaspatest:` addresses are allowed. `kaspa:` (mainnet) and other pr
 On boot, you get wallet selection:
 - wallet index to select saved wallet
 - `g` generate wallet (last option)
+- after selection, console clears and shows selected wallet before prompt
 
 Inside console input, `↑` and `↓` navigate previous/next command history.
 
 Inside console, run `help` and use:
+- `clear` (clear terminal)
+- `config` / `config show`
+- `config rpc <host:port|grpc://host:port>`
+- `wallet` / `wallet list`
+- `wallet use <index>` (wallet indexes start at `1`)
+- `wallet pk` (shows currently selected private key)
+- `wallet delete <index>` (asks for `yes` confirmation; wallet indexes start at `1`)
+- `fees` (show current RPC fee estimate buckets)
 - `balance`
 - `utxos` (summary count + totals)
 - `utxos detail` (full list)
 - `pending-txs`
 - `tx-status <txid|b|last>`
-- `wallets`
-- `wallet-pk` (shows currently selected private key)
-- `use-wallet <index>` (wallet indexes start at `1`)
-- `delete-wallet <index>` (asks for `yes` confirmation; wallet indexes start at `1`)
+- `contracts` (interactive `.sil` contract browser and source viewer)
+- `contracts <path.sil>` (print one contract source file)
 - `compile <source.sil> [out.json] [constructor_args.json]` (default output goes to current compiled dir)
-- `compile-contracts [contracts_dir] [compiled_dir]` (defaults: `contracts` -> `compiled-silverscript`)
+- `compile -i` (fully guided compile flow: pick contract, optional output path, typed constructor args)
+- `compile -i <source.sil> [out.json]` (interactive constructor args prompt; no args JSON file needed)
+- `compile all [contracts_dir] [compiled_dir]` (defaults: `contracts/silverscript` -> `contracts/compiled`; auto-loads constructor args from `contracts/params/<name>_ctor.json` or `contracts/params/<name>.json` when present)
 - `deploy` (interactive picker from compiled dir + amount prompt)
+- `deploy -i` (same as `deploy`; explicit interactive mode)
 - `deploy <compiled.json> <amount_sompi>`
 - `spend-contract <compiled.json> <txid:vout> <input_amount_sompi> <function> <args.json|-> <outputs.json>`
+- `spend-contract -i` (fully guided spend flow: contract selection, outpoint, amount, function, args, outputs; supports `self` address alias and one `all` amount)
+- `spend-contract -i <compiled.json> <txid:vout> <input_amount_sompi> <function> <outputs.json>` (interactive ABI-typed function args prompt)
 - `spend-contract-signed <compiled.json> <txid:vout> <input_amount_sompi> <function> <args.json> <outputs.json>`
+- `send -h` (show send options)
 - `send <to_address> <amount_sompi>`
-- `submit-self <amount_sompi>`
-- `compound [max_inputs]`
+- `send -s <amount_sompi>` (self-send)
+- `send -c [max_inputs]` (compound UTXOs)
 - `history [limit]`
 - `back` (return to wallet selection)
 - `exit`
+
+Per-command help:
+- `config -h`
+- `wallet -h`
+- `compile -h`
+- `contracts -h`
+- `deploy -h`
+- `spend-contract -h`
+- `send -h`
 
 `tx-status` shortcuts:
 - `tx-status b` opens a picker from saved tx history entries
@@ -97,19 +116,47 @@ Use the same model for every covenant spend:
 Minimal lifecycle example:
 ```text
 compile ../silverscript/silverscript-lang/tests/examples/simple_if_statement.sil
-deploy compiled-silverscript/simple_if_statement.json 100000000
-spend-contract compiled-silverscript/simple_if_statement.json <DEPLOY_TXID:0> 100000000 hello contract-params/simple_if_statement_hello_else_args.json contract-params/spend_outputs_template.json
+deploy contracts/compiled/simple_if_statement.json 100000000
+spend-contract contracts/compiled/simple_if_statement.json <DEPLOY_TXID:0> 100000000 hello contracts/params/simple_if_statement_hello_else_args.json contracts/params/spend_outputs_template.json
 ```
+
+Interactive (no args JSON) example:
+```text
+compile -i contracts/silverscript/openhashlock.sil
+deploy contracts/compiled/openhashlock.json 1000000000
+spend-contract -i contracts/compiled/openhashlock.json <DEPLOY_TXID:0> 1000000000 claim contracts/params/openhashlock_outputs.json
+```
+
+Guided interactive spend (no args/outputs files) example:
+```text
+spend-contract -i
+```
+
+Guided spend shortcuts:
+- In output address prompts, type `self` to use the currently selected wallet address.
+- In exactly one output amount prompt, type `all` or `max` to send the remaining input amount after subtracting fastest-fee and other explicit outputs.
+- For outpoint fields, type `last` to use the most recent `deploy-covenant` outpoint from history.
+- In guided spend, if entered outputs leave fee below fastest recommendation, the shortfall is auto-deducted from the last output.
+
+## Contract Workspace Layout
+
+Default workspace under `kascov/contracts/`:
+- `contracts/silverscript/` contract sources (`.sil`)
+- `contracts/compiled/` compiled artifacts (`.json`)
+- `contracts/params/` constructor/function/output parameter files
 
 ## Persistence
 
 - Wallets file: `wallets.json` (override with `KASPA_WALLETS_FILE`)
-- Tx history file: `tx-history.jsonl` (override with `KASPA_HISTORY_FILE`)
+- Tx history file: `tx-history.jsonl` (override with `KASPA_HISTORY_FILE`); includes successful tx submissions and failed deploy/spend/send attempts with error details
 - Console command history file: `.kascov-console-history` (override with `KASPA_CONSOLE_HISTORY_FILE`)
 
 ## Notes
 
-- `KASPA_FEE_SOMPI` applies to `send`, `submit-self`, `deploy`, and `compound`.
+- Transaction-building commands use RPC fee estimate `priority_bucket` (fastest inclusion target): `send`, `send -s`, `send -c`, `deploy`, `spend-contract`, and `spend-contract-signed`.
+- `fees` prints current priority/normal/low feerate buckets from RPC.
+- `spend-contract` / `spend-contract-signed` enforce a minimum recommended fee for fastest policy; if outputs imply a lower fee, command returns an error and asks you to lower outputs total.
 - `.env` only controls RPC and fee overrides; wallet keys/addresses are selected in-console or via CLI flags.
 - `--rpc` accepts `host:port` or `grpc://host:port`.
-- On startup, `kascov` ensures `contracts/`, `compiled-silverscript/`, and `contract-params/` exist (or custom `--contracts-dir` / `--out-dir` paths for the first two).
+- `deploy` output includes `contract_address` (derived P2SH testnet address) and `contract_output_outpoint`.
+- On startup, `kascov` ensures `contracts/silverscript/`, `contracts/compiled/`, and `contracts/params/` exist (or custom `--contracts-dir` / `--out-dir` for source/compiled paths).

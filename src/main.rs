@@ -9,9 +9,9 @@ mod ui;
 const DEFAULT_RPC: &str = "66.23.234.250:16210";
 const DEFAULT_PRIVATE_KEY: &str = "f2017e3d1f509e53f8c1dc2c941062508b06aed612a9a97e2a58b3aab7e9e829";
 const DEFAULT_ADDRESS: &str = "kaspatest:qp8snfastxwvcu40sy7sfwwad0kpkjt2flcdkuuk4gw2td0mcauukn2pq66m6";
-const DEFAULT_CONTRACTS_DIR: &str = "contracts";
-const DEFAULT_COMPILED_DIR: &str = "compiled-silverscript";
-const DEFAULT_CONTRACT_PARAMS_DIR: &str = "contract-params";
+const DEFAULT_CONTRACTS_DIR: &str = "contracts/silverscript";
+const DEFAULT_COMPILED_DIR: &str = "contracts/compiled";
+const DEFAULT_CONTRACT_PARAMS_DIR: &str = "contracts/params";
 
 #[derive(Parser, Debug)]
 #[command(name = "kascov")]

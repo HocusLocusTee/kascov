@@ -8,7 +8,9 @@ use kaspa_consensus_core::{
 };
 use kaspa_grpc_client::GrpcClient;
 use kaspa_rpc_core::{api::rpc::RpcApi, notify::mode::NotificationMode};
-use kaspa_txscript::{pay_to_address_script, pay_to_script_hash_script, pay_to_script_hash_signature_script};
+use kaspa_txscript::{
+    extract_script_pub_key_address, pay_to_address_script, pay_to_script_hash_script, pay_to_script_hash_signature_script,
+};
 use secp256k1::{Keypair, Message, SecretKey};
 use serde::Deserialize;
 use silverscript_lang::{
@@ -24,21 +26,24 @@ use walkdir::WalkDir;
 use crate::storage::{parse_testnet_address, save_tx_history};
 use crate::ui::{print_header, print_kv};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SpendOutputSpec {
     address: String,
     amount_sompi: u64,
 }
 
 pub fn cmd_compile_sil(source: &str, out: Option<&str>, constructor_args_path: Option<&str>) -> Result<(), String> {
-    let source_text = fs::read_to_string(source).map_err(|err| format!("failed to read source file {source}: {err}"))?;
-
     let constructor_args = if let Some(path) = constructor_args_path {
         let json = fs::read_to_string(path).map_err(|err| format!("failed to read constructor args {path}: {err}"))?;
         serde_json::from_str::<Vec<Expr>>(&json).map_err(|err| format!("failed to parse constructor args {path}: {err}"))?
     } else {
         Vec::new()
     };
+    cmd_compile_sil_with_args(source, out, constructor_args)
+}
+
+pub fn cmd_compile_sil_with_args(source: &str, out: Option<&str>, constructor_args: Vec<Expr>) -> Result<(), String> {
+    let source_text = fs::read_to_string(source).map_err(|err| format!("failed to read source file {source}: {err}"))?;
 
     let compiled =
         compile_contract(&source_text, &constructor_args, CompileOptions::default()).map_err(|err| format!("compile error: {err}"))?;
@@ -51,6 +56,51 @@ pub fn cmd_compile_sil(source: &str, out: Option<&str>, constructor_args_path: O
     println!("compiled={source}");
     println!("output={output_path}");
     Ok(())
+}
+
+fn constructor_args_for_batch_contract(
+    contracts_path: &Path,
+    source_path: &Path,
+) -> Result<(Vec<Expr>, Option<PathBuf>), String> {
+    let relative = source_path
+        .strip_prefix(contracts_path)
+        .map_err(|err| format!("failed to map relative path for {}: {err}", source_path.display()))?;
+
+    let params_parent = contracts_path.parent().unwrap_or_else(|| Path::new("."));
+    let params_root = if params_parent.join("params").exists() {
+        params_parent.join("params")
+    } else {
+        params_parent.join("contract-params")
+    };
+
+    let relative_without_ext = relative.with_extension("");
+    let stem = relative_without_ext
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("failed to resolve contract stem for {}", source_path.display()))?;
+    let rel_parent = relative_without_ext.parent().unwrap_or_else(|| Path::new(""));
+
+    let ctor_candidate = params_root.join(rel_parent).join(format!("{stem}_ctor.json"));
+    let plain_candidate = params_root.join(&relative_without_ext).with_extension("json");
+
+    let constructor_args_path = if ctor_candidate.exists() {
+        Some(ctor_candidate)
+    } else if plain_candidate.exists() {
+        Some(plain_candidate)
+    } else {
+        None
+    };
+
+    let constructor_args = if let Some(path) = constructor_args_path.as_ref() {
+        let json =
+            fs::read_to_string(path).map_err(|err| format!("failed to read constructor args {}: {err}", path.display()))?;
+        serde_json::from_str::<Vec<Expr>>(&json)
+            .map_err(|err| format!("failed to parse constructor args {}: {err}", path.display()))?
+    } else {
+        Vec::new()
+    };
+
+    Ok((constructor_args, constructor_args_path))
 }
 
 pub fn cmd_compile_contracts(contracts_dir: &str, out_dir: &str) -> Result<(), String> {
@@ -79,11 +129,18 @@ pub fn cmd_compile_contracts(contracts_dir: &str, out_dir: &str) -> Result<(), S
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent).map_err(|err| format!("failed to create dir {}: {err}", parent.display()))?;
         }
-        cmd_compile_sil(
-            &source_path.to_string_lossy(),
-            Some(&output_path.to_string_lossy()),
-            None,
-        )?;
+        let source_text = fs::read_to_string(source_path)
+            .map_err(|err| format!("failed to read source file {}: {err}", source_path.display()))?;
+        let (constructor_args, constructor_args_path) = constructor_args_for_batch_contract(contracts_path, source_path)?;
+        let compiled = compile_contract(&source_text, &constructor_args, CompileOptions::default())
+            .map_err(|err| format!("compile error in {}: {err}", source_path.display()))?;
+        let json = serde_json::to_string_pretty(&compiled).map_err(|err| format!("failed to serialize output: {err}"))?;
+        fs::write(&output_path, json).map_err(|err| format!("failed to write output {}: {err}", output_path.display()))?;
+        println!("compiled={}", source_path.display());
+        if let Some(path) = constructor_args_path {
+            println!("constructor_args={}", path.display());
+        }
+        println!("output={}", output_path.display());
         compiled_count += 1;
     }
 
@@ -317,11 +374,36 @@ pub async fn cmd_tx_status(rpc: &str, txid: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub async fn cmd_fee_estimate(rpc: &str) -> Result<(), String> {
+    let client = connect_grpc(rpc).await?;
+    let estimate = client.get_fee_estimate().await.map_err(|err| format!("get_fee_estimate failed: {err}"))?;
+
+    print_header("Fee Estimate");
+    print_kv("policy_default", "priority_bucket (fastest)");
+    print_kv("priority_feerate_sompi_per_gram", estimate.priority_bucket.feerate);
+    print_kv("priority_estimated_seconds", estimate.priority_bucket.estimated_seconds);
+
+    if let Some(bucket) = estimate.normal_buckets.first() {
+        print_kv("normal_feerate_sompi_per_gram", bucket.feerate);
+        print_kv("normal_estimated_seconds", bucket.estimated_seconds);
+    }
+    if let Some(bucket) = estimate.low_buckets.first() {
+        print_kv("low_feerate_sompi_per_gram", bucket.feerate);
+        print_kv("low_estimated_seconds", bucket.estimated_seconds);
+    }
+
+    print_kv("normal_bucket_count", estimate.normal_buckets.len());
+    print_kv("low_bucket_count", estimate.low_buckets.len());
+
+    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    Ok(())
+}
+
 pub async fn cmd_submit_self(rpc: &str, private_key: &str, address: &str, amount_sompi: u64) -> Result<(), String> {
     let address = parse_testnet_address(address)?;
     let keypair = parse_keypair(private_key)?;
-    let fee_override = fee_override_from_env()?;
     let client = connect_grpc(rpc).await?;
+    let fee_policy = resolve_fee_policy(&client).await?;
 
     let server = client.get_server_info().await.map_err(|err| format!("get_server_info failed: {err}"))?;
     print_header("Submit Self");
@@ -344,13 +426,13 @@ pub async fn cmd_submit_self(rpc: &str, private_key: &str, address: &str, amount
     for item in sorted {
         total_in += item.utxo_entry.amount;
         selected.push((TransactionOutpoint::from(item.outpoint), UtxoEntry::from(item.utxo_entry)));
-        let need = amount_sompi + fee_sompi_with_override(selected.len(), 2, fee_override);
+        let need = amount_sompi + fee_sompi_for_policy(selected.len(), 2, fee_policy);
         if total_in >= need {
             break;
         }
     }
 
-    let tx_fee = fee_sompi_with_override(selected.len(), 2, fee_override);
+    let tx_fee = fee_sompi_for_policy(selected.len(), 2, fee_policy);
     let required = amount_sompi + tx_fee;
     if total_in < required {
         return Err(format!("insufficient funds: total_in={total_in} required={required}"));
@@ -379,6 +461,7 @@ pub async fn cmd_submit_self(rpc: &str, private_key: &str, address: &str, amount
 
     print_kv("submitted_txid", txid);
     print_kv("amount_sompi", amount_sompi);
+    print_kv("fee_source", fee_policy.label());
     print_kv("fee_sompi", tx_fee);
     print_kv("change_sompi", change);
     save_tx_history(
@@ -403,8 +486,8 @@ pub async fn cmd_send(
     let from_address = parse_testnet_address(from_address)?;
     let to_address = parse_testnet_address(to_address)?;
     let keypair = parse_keypair(private_key)?;
-    let fee_override = fee_override_from_env()?;
     let client = connect_grpc(rpc).await?;
+    let fee_policy = resolve_fee_policy(&client).await?;
 
     let server = client.get_server_info().await.map_err(|err| format!("get_server_info failed: {err}"))?;
     print_header("Send");
@@ -429,13 +512,13 @@ pub async fn cmd_send(
     for item in sorted {
         total_in += item.utxo_entry.amount;
         selected.push((TransactionOutpoint::from(item.outpoint), UtxoEntry::from(item.utxo_entry)));
-        let need = amount_sompi + fee_sompi_with_override(selected.len(), 2, fee_override);
+        let need = amount_sompi + fee_sompi_for_policy(selected.len(), 2, fee_policy);
         if total_in >= need {
             break;
         }
     }
 
-    let tx_fee = fee_sompi_with_override(selected.len(), 2, fee_override);
+    let tx_fee = fee_sompi_for_policy(selected.len(), 2, fee_policy);
     let required = amount_sompi + tx_fee;
     if total_in < required {
         return Err(format!("insufficient funds: total_in={total_in} required={required}"));
@@ -465,6 +548,7 @@ pub async fn cmd_send(
 
     print_kv("submitted_txid", txid);
     print_kv("amount_sompi", amount_sompi);
+    print_kv("fee_source", fee_policy.label());
     print_kv("fee_sompi", tx_fee);
     print_kv("change_sompi", change);
     save_tx_history(
@@ -530,6 +614,13 @@ fn build_spend_outputs(spec: Vec<SpendOutputSpec>) -> Result<(Vec<TransactionOut
     Ok((outputs, total_outputs))
 }
 
+fn summarize_spend_outputs(spec: &[SpendOutputSpec]) -> String {
+    spec.iter()
+        .map(|item| format!("{}:{}", item.address, item.amount_sompi))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 fn build_spend_contract_tx(
     compiled: &CompiledContract,
     outpoint: TransactionOutpoint,
@@ -572,27 +663,162 @@ pub async fn cmd_spend_contract(
     function_args_path: &str,
     outputs_path: &str,
 ) -> Result<(), String> {
+    let function_args = load_function_args(function_args_path)?;
+    cmd_spend_contract_with_args(
+        rpc,
+        compiled_path,
+        outpoint,
+        input_amount_sompi,
+        function_name,
+        function_args,
+        outputs_path,
+        function_args_path,
+    )
+    .await
+}
+
+pub async fn cmd_spend_contract_with_args(
+    rpc: &str,
+    compiled_path: &str,
+    outpoint: &str,
+    input_amount_sompi: u64,
+    function_name: &str,
+    function_args: Vec<Expr>,
+    outputs_path: &str,
+    function_args_label: &str,
+) -> Result<(), String> {
+    let outputs_spec = load_spend_outputs(outputs_path)?
+        .into_iter()
+        .map(|item| (item.address, Some(item.amount_sompi)))
+        .collect::<Vec<_>>();
+    cmd_spend_contract_with_args_and_outputs(
+        rpc,
+        compiled_path,
+        outpoint,
+        input_amount_sompi,
+        function_name,
+        function_args,
+        outputs_spec,
+        function_args_label,
+        outputs_path,
+    )
+    .await
+}
+
+pub async fn cmd_spend_contract_with_args_and_outputs(
+    rpc: &str,
+    compiled_path: &str,
+    outpoint: &str,
+    input_amount_sompi: u64,
+    function_name: &str,
+    function_args: Vec<Expr>,
+    outputs_spec: Vec<(String, Option<u64>)>,
+    function_args_label: &str,
+    outputs_label: &str,
+) -> Result<(), String> {
     if input_amount_sompi == 0 {
         return Err("input_amount_sompi must be greater than 0".to_string());
     }
 
     let outpoint = parse_outpoint_text(outpoint)?;
     let compiled = load_compiled_contract(compiled_path)?;
-    let function_args = load_function_args(function_args_path)?;
-    let (outputs, total_outputs) = build_spend_outputs(load_spend_outputs(outputs_path)?)?;
+    if outputs_spec.is_empty() {
+        return Err("at least one output is required".to_string());
+    }
+    let client = connect_grpc(rpc).await?;
+    let fee_policy = resolve_fee_policy(&client).await?;
+    let output_count = outputs_spec.len();
+    let recommended_fee_sompi = fee_sompi_for_policy(1, output_count, fee_policy);
+
+    let mut all_index: Option<usize> = None;
+    let mut explicit_total = 0u64;
+    for (index, (_, amount)) in outputs_spec.iter().enumerate() {
+        if let Some(value) = amount {
+            explicit_total = explicit_total.saturating_add(*value);
+        } else if all_index.is_some() {
+            return Err("only one output can use `all` amount".to_string());
+        } else {
+            all_index = Some(index);
+        }
+    }
+
+    let mut resolved_outputs = Vec::with_capacity(outputs_spec.len());
+    let mut auto_fee_deducted_sompi: Option<u64> = None;
+    let guided_outputs_mode = outputs_label == "<interactive>";
+    let fee_sompi = if let Some(all_idx) = all_index {
+        let needed = explicit_total.saturating_add(recommended_fee_sompi);
+        if needed > input_amount_sompi {
+            return Err(format!(
+                "outputs + fastest fee exceed input amount: explicit_outputs_total_sompi={explicit_total} recommended_fee_sompi={recommended_fee_sompi} input_amount_sompi={input_amount_sompi}"
+            ));
+        }
+        let all_amount = input_amount_sompi - needed;
+        if all_amount == 0 {
+            return Err(
+                "resolved `all` output amount is 0; reduce other outputs or increase input amount"
+                    .to_string(),
+            );
+        }
+        for (index, (address, amount)) in outputs_spec.into_iter().enumerate() {
+            let resolved_amount = if index == all_idx {
+                all_amount
+            } else {
+                amount.unwrap_or(0)
+            };
+            resolved_outputs.push((address, resolved_amount));
+        }
+        recommended_fee_sompi
+    } else {
+        if explicit_total > input_amount_sompi {
+            return Err(format!(
+                "outputs exceed input amount: outputs_total_sompi={explicit_total} input_amount_sompi={input_amount_sompi}"
+            ));
+        }
+        for (address, amount) in outputs_spec {
+            resolved_outputs.push((address, amount.unwrap_or(0)));
+        }
+        let implied_fee = input_amount_sompi - explicit_total;
+        if implied_fee < recommended_fee_sompi {
+            if guided_outputs_mode {
+                let shortfall = recommended_fee_sompi - implied_fee;
+                let last = resolved_outputs
+                    .last_mut()
+                    .ok_or_else(|| "at least one output is required".to_string())?;
+                if last.1 <= shortfall {
+                    return Err(format!(
+                        "fee too low for fastest policy and auto-deduct failed: fee_sompi={implied_fee} recommended_fee_sompi={recommended_fee_sompi} shortfall_sompi={shortfall} last_output_amount_sompi={} (reduce outputs or use `all`/`max`)",
+                        last.1
+                    ));
+                }
+                last.1 -= shortfall;
+                auto_fee_deducted_sompi = Some(shortfall);
+                recommended_fee_sompi
+            } else {
+                return Err(format!(
+                    "fee too low for fastest policy: fee_sompi={implied_fee} recommended_fee_sompi={recommended_fee_sompi} (adjust outputs total down)"
+                ));
+            }
+        } else {
+            implied_fee
+        }
+    };
+
+    let outputs_spec = resolved_outputs
+        .into_iter()
+        .map(|(address, amount_sompi)| SpendOutputSpec { address, amount_sompi })
+        .collect::<Vec<_>>();
+    let outputs_summary = summarize_spend_outputs(&outputs_spec);
+    let (outputs, total_outputs) = build_spend_outputs(outputs_spec)?;
     if total_outputs > input_amount_sompi {
         return Err(format!(
             "outputs exceed input amount: outputs_total_sompi={total_outputs} input_amount_sompi={input_amount_sompi}"
         ));
     }
-    let fee_sompi = input_amount_sompi - total_outputs;
 
     let sig_prefix = compiled
         .build_sig_script(function_name, function_args)
         .map_err(|err| format!("failed to build signature script: {err}"))?;
     let tx = build_spend_contract_tx(&compiled, outpoint, input_amount_sompi, sig_prefix, outputs)?;
-
-    let client = connect_grpc(rpc).await?;
     let txid = client
         .submit_transaction((&(*tx.tx)).into(), false)
         .await
@@ -604,7 +830,12 @@ pub async fn cmd_spend_contract(
     print_kv("spent_outpoint", format!("{}:{}", outpoint.transaction_id, outpoint.index));
     print_kv("function", function_name);
     print_kv("outputs_total_sompi", total_outputs);
+    print_kv("fee_source", fee_policy.label());
+    print_kv("recommended_fee_sompi", recommended_fee_sompi);
     print_kv("fee_sompi", fee_sompi);
+    if let Some(shortfall) = auto_fee_deducted_sompi {
+        print_kv("auto_fee_deducted_from_last_output_sompi", shortfall);
+    }
     print_kv("output_count", tx.tx.outputs.len());
 
     save_tx_history(
@@ -613,16 +844,20 @@ pub async fn cmd_spend_contract(
         rpc,
         "contract-p2sh",
         format!(
-            "contract={} outpoint={}:{} function={} input_amount_sompi={} outputs_total_sompi={} fee_sompi={} outputs_file={} args_file={}",
+            "contract={} outpoint={}:{} function={} input_amount_sompi={} outputs_total_sompi={} fee_source={} recommended_fee_sompi={} fee_sompi={} auto_fee_deducted_sompi={} outputs_file={} outputs={} args_file={}",
             compiled.contract_name,
             outpoint.transaction_id,
             outpoint.index,
             function_name,
             input_amount_sompi,
             total_outputs,
+            fee_policy.label(),
+            recommended_fee_sompi,
             fee_sompi,
-            outputs_path,
-            function_args_path
+            auto_fee_deducted_sompi.unwrap_or(0),
+            outputs_label,
+            outputs_summary,
+            function_args_label
         ),
     );
 
@@ -649,13 +884,23 @@ pub async fn cmd_spend_contract_signed(
     let keypair = parse_keypair(private_key)?;
     let pubkey = keypair.x_only_public_key().0.serialize();
     let function_args_raw = load_function_args(function_args_path)?;
-    let (outputs, total_outputs) = build_spend_outputs(load_spend_outputs(outputs_path)?)?;
+    let outputs_spec = load_spend_outputs(outputs_path)?;
+    let outputs_summary = summarize_spend_outputs(&outputs_spec);
+    let (outputs, total_outputs) = build_spend_outputs(outputs_spec)?;
     if total_outputs > input_amount_sompi {
         return Err(format!(
             "outputs exceed input amount: outputs_total_sompi={total_outputs} input_amount_sompi={input_amount_sompi}"
         ));
     }
     let fee_sompi = input_amount_sompi - total_outputs;
+    let client = connect_grpc(rpc).await?;
+    let fee_policy = resolve_fee_policy(&client).await?;
+    let recommended_fee_sompi = fee_sompi_for_policy(1, outputs.len(), fee_policy);
+    if fee_sompi < recommended_fee_sompi {
+        return Err(format!(
+            "fee too low for fastest policy: fee_sompi={fee_sompi} recommended_fee_sompi={recommended_fee_sompi} (adjust outputs total down)"
+        ));
+    }
 
     let placeholder_tx = build_spend_contract_tx(
         &compiled,
@@ -681,8 +926,6 @@ pub async fn cmd_spend_contract_signed(
         .build_sig_script(function_name, function_args)
         .map_err(|err| format!("failed to build signature script: {err}"))?;
     let tx = build_spend_contract_tx(&compiled, outpoint, input_amount_sompi, sig_prefix, outputs)?;
-
-    let client = connect_grpc(rpc).await?;
     let txid = client
         .submit_transaction((&(*tx.tx)).into(), false)
         .await
@@ -694,6 +937,8 @@ pub async fn cmd_spend_contract_signed(
     print_kv("spent_outpoint", format!("{}:{}", outpoint.transaction_id, outpoint.index));
     print_kv("function", function_name);
     print_kv("outputs_total_sompi", total_outputs);
+    print_kv("fee_source", fee_policy.label());
+    print_kv("recommended_fee_sompi", recommended_fee_sompi);
     print_kv("fee_sompi", fee_sompi);
     print_kv("output_count", tx.tx.outputs.len());
 
@@ -703,15 +948,18 @@ pub async fn cmd_spend_contract_signed(
         rpc,
         "contract-p2sh",
         format!(
-            "contract={} outpoint={}:{} function={} input_amount_sompi={} outputs_total_sompi={} fee_sompi={} outputs_file={} args_file={} signer_pubkey={}",
+            "contract={} outpoint={}:{} function={} input_amount_sompi={} outputs_total_sompi={} fee_source={} recommended_fee_sompi={} fee_sompi={} outputs_file={} outputs={} args_file={} signer_pubkey={}",
             compiled.contract_name,
             outpoint.transaction_id,
             outpoint.index,
             function_name,
             input_amount_sompi,
             total_outputs,
+            fee_policy.label(),
+            recommended_fee_sompi,
             fee_sompi,
             outputs_path,
+            outputs_summary,
             function_args_path,
             hex_encode(&pubkey)
         ),
@@ -724,8 +972,8 @@ pub async fn cmd_spend_contract_signed(
 pub async fn cmd_compound_utxos(rpc: &str, private_key: &str, address: &str, max_inputs: usize) -> Result<(), String> {
     let address = parse_testnet_address(address)?;
     let keypair = parse_keypair(private_key)?;
-    let fee_override = fee_override_from_env()?;
     let client = connect_grpc(rpc).await?;
+    let fee_policy = resolve_fee_policy(&client).await?;
     if max_inputs == 0 {
         return Err("max_inputs must be at least 1".to_string());
     }
@@ -780,7 +1028,7 @@ pub async fn cmd_compound_utxos(rpc: &str, private_key: &str, address: &str, max
         ));
     }
 
-    let tx_fee = fee_sompi_with_override(selected.len(), 1, fee_override);
+    let tx_fee = fee_sompi_for_policy(selected.len(), 1, fee_policy);
     if total_in <= tx_fee {
         return Err(format!("insufficient funds: total_in={total_in} fee_sompi={tx_fee}"));
     }
@@ -807,6 +1055,7 @@ pub async fn cmd_compound_utxos(rpc: &str, private_key: &str, address: &str, max
     print_kv("max_inputs", max_inputs);
     print_kv("skipped_mempool_spent", skipped_mempool_spent);
     print_kv("output_count", signed.tx.outputs.len());
+    print_kv("fee_source", fee_policy.label());
     print_kv("output_amount_sompi", output_amount);
     print_kv("fee_sompi", tx_fee);
     save_tx_history(
@@ -837,8 +1086,8 @@ pub async fn cmd_deploy_covenant(
 ) -> Result<(), String> {
     let address = parse_testnet_address(address)?;
     let keypair = parse_keypair(private_key)?;
-    let fee_override = fee_override_from_env()?;
     let client = connect_grpc(rpc).await?;
+    let fee_policy = resolve_fee_policy(&client).await?;
 
     let compiled_json =
         fs::read_to_string(compiled_path).map_err(|err| format!("failed to read compiled json {compiled_path}: {err}"))?;
@@ -861,13 +1110,13 @@ pub async fn cmd_deploy_covenant(
     for item in sorted {
         total_in += item.utxo_entry.amount;
         selected.push((TransactionOutpoint::from(item.outpoint), UtxoEntry::from(item.utxo_entry)));
-        let need = amount_sompi + fee_sompi_with_override(selected.len(), 2, fee_override);
+        let need = amount_sompi + fee_sompi_for_policy(selected.len(), 2, fee_policy);
         if total_in >= need {
             break;
         }
     }
 
-    let tx_fee = fee_sompi_with_override(selected.len(), 2, fee_override);
+    let tx_fee = fee_sompi_for_policy(selected.len(), 2, fee_policy);
     let required = amount_sompi + tx_fee;
     if total_in < required {
         return Err(format!("insufficient funds: total_in={total_in} required={required}"));
@@ -876,6 +1125,8 @@ pub async fn cmd_deploy_covenant(
     let change = total_in - required;
     let source_spk = pay_to_address_script(&address);
     let covenant_spk = pay_to_script_hash_script(&compiled.script);
+    let contract_address = extract_script_pub_key_address(&covenant_spk, address.prefix)
+        .map_err(|err| format!("failed to derive contract address from locking script: {err}"))?;
 
     let inputs: Vec<_> = selected
         .iter()
@@ -899,9 +1150,11 @@ pub async fn cmd_deploy_covenant(
     print_header("Deploy Covenant");
     print_kv("submitted_txid", txid);
     print_kv("contract_name", &compiled.contract_name);
+    print_kv("contract_address", &contract_address);
     print_kv("contract_output_outpoint", format!("{txid}:0"));
     print_kv("locking_type", "p2sh");
     print_kv("amount_sompi", amount_sompi);
+    print_kv("fee_source", fee_policy.label());
     print_kv("fee_sompi", tx_fee);
     print_kv("change_sompi", change);
     save_tx_history(
@@ -910,8 +1163,8 @@ pub async fn cmd_deploy_covenant(
         rpc,
         &address.to_string(),
         format!(
-            "contract_name={} compiled={} amount_sompi={} fee_sompi={} change_sompi={}",
-            compiled.contract_name, compiled_path, amount_sompi, tx_fee, change
+            "contract_name={} compiled={} contract_address={} contract_output_outpoint={}:0 amount_sompi={} fee_source={} fee_sompi={} change_sompi={}",
+            compiled.contract_name, compiled_path, contract_address, txid, amount_sompi, fee_policy.label(), tx_fee, change
         ),
     );
 
@@ -943,21 +1196,50 @@ fn fee_sompi(num_inputs: usize, num_outputs: usize) -> u64 {
     10u64 * estimated_mass
 }
 
-fn fee_override_from_env() -> Result<Option<u64>, String> {
-    match std::env::var("KASPA_FEE_SOMPI") {
-        Ok(value) => {
-            let fee = value
-                .parse::<u64>()
-                .map_err(|err| format!("invalid KASPA_FEE_SOMPI value '{value}': {err}"))?;
-            Ok(Some(fee))
+#[derive(Debug, Clone, Copy)]
+enum FeePolicy {
+    RpcFastest(f64),
+    Heuristic,
+}
+
+impl FeePolicy {
+    fn label(&self) -> &'static str {
+        match self {
+            FeePolicy::RpcFastest(_) => "rpc-fastest",
+            FeePolicy::Heuristic => "heuristic",
         }
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(err) => Err(format!("failed reading KASPA_FEE_SOMPI: {err}")),
     }
 }
 
-fn fee_sompi_with_override(num_inputs: usize, num_outputs: usize, fee_override: Option<u64>) -> u64 {
-    fee_override.unwrap_or_else(|| fee_sompi(num_inputs, num_outputs))
+fn estimated_mass(num_inputs: usize, num_outputs: usize) -> u64 {
+    200u64 + 34u64 * num_outputs as u64 + 1000u64 * num_inputs as u64
+}
+
+fn fee_sompi_for_policy(num_inputs: usize, num_outputs: usize, policy: FeePolicy) -> u64 {
+    match policy {
+        FeePolicy::RpcFastest(feerate) => {
+            let mass = estimated_mass(num_inputs, num_outputs) as f64;
+            let fee = (feerate * mass).ceil();
+            if fee.is_finite() && fee > 0.0 {
+                fee as u64
+            } else {
+                fee_sompi(num_inputs, num_outputs)
+            }
+        }
+        FeePolicy::Heuristic => fee_sompi(num_inputs, num_outputs),
+    }
+}
+
+async fn resolve_fee_policy(client: &GrpcClient) -> Result<FeePolicy, String> {
+    let estimate = client
+        .get_fee_estimate()
+        .await
+        .map_err(|err| format!("get_fee_estimate failed: {err}"))?;
+    let feerate = estimate.priority_bucket.feerate;
+    if feerate.is_finite() && feerate > 0.0 {
+        return Ok(FeePolicy::RpcFastest(feerate));
+    }
+    Ok(FeePolicy::Heuristic)
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
