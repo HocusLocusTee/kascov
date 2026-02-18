@@ -8,8 +8,9 @@ use walkdir::WalkDir;
 
 use crate::commands::{
     cmd_balance, cmd_compile_contracts, cmd_compile_sil, cmd_compile_sil_with_args, cmd_compound_utxos, cmd_deploy_covenant,
-    cmd_fee_estimate, cmd_pending_txs, cmd_send, cmd_spend_contract, cmd_spend_contract_signed, cmd_spend_contract_with_args,
-    cmd_spend_contract_with_args_and_outputs, cmd_submit_self, cmd_tx_status, cmd_utxos, SpendOutputDestination,
+    cmd_fee_estimate, cmd_pending_txs, cmd_send, cmd_send_all_self_with_payload, cmd_send_with_payload, cmd_spend_contract,
+    cmd_spend_contract_signed, cmd_spend_contract_with_args, cmd_spend_contract_with_args_and_outputs, cmd_submit_self, cmd_tx_status,
+    cmd_utxos, SpendOutputDestination,
 };
 use crate::storage::{
     cmd_history, cmd_wallets, generate_wallet_record, history_path, list_history, load_wallets, parse_testnet_address,
@@ -153,6 +154,11 @@ fn print_send_help() {
     println!("usage: send <to_address> <amount>");
     println!("  send funds to another testnet address");
     println!();
+    println!("usage: send -p [to_address] <amount> <payload_text...>");
+    println!("  send tx with UTF-8 payload (auto-hex encoded into tx payload field)");
+    println!("  omit to_address to send to self");
+    println!("  shortcut: send -p <payload_text...> sends all available balance to self with payload");
+    println!();
     println!("usage: send -s <amount>");
     println!("  self-send: send from active wallet back to the same address");
     println!();
@@ -161,6 +167,8 @@ fn print_send_help() {
     println!("  amount unit is controlled by KASPA_AMOUNT_UNIT (SOMPI default, or KAS)");
     println!();
     println!("example: send kaspatest:qp... 250000000");
+    println!("example: send -p kaspatest:qp... 1000000 hello kaspa");
+    println!("example: send -p 1000000 hello from self");
     println!("example: send -s 100000000");
     println!("example: send -c 900");
 }
@@ -1603,6 +1611,74 @@ pub async fn cmd_console(
             "send" => {
                 if parts.len() == 1 || (parts.len() == 2 && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help")) {
                     print_send_help();
+                    continue;
+                }
+                if parts.len() >= 2 && parts[1] == "-p" {
+                    if parts.len() < 3 {
+                        print_send_help();
+                        continue;
+                    }
+                    let mut to_address = address.as_str();
+                    let (amount_arg_index, payload_start, all_self_shortcut) =
+                        if parts[2].starts_with("kaspatest:") || parts[2].starts_with("kaspa:") {
+                            if parts.len() < 5 {
+                                println!("error: missing amount or payload text for send -p");
+                                continue;
+                            }
+                            if let Err(err) = parse_testnet_address(parts[2]) {
+                                println!("error: invalid to_address: {err}");
+                                continue;
+                            }
+                            to_address = parts[2];
+                            (3, 4, false)
+                        } else {
+                            match parse_amount_cli_arg("amount", parts[2], amount_unit) {
+                                Ok(_) => (2, 3, false),
+                                Err(_) => (0, 2, true),
+                            }
+                        };
+                    if parts.len() <= payload_start {
+                        println!("error: payload text is required");
+                        continue;
+                    }
+                    let payload_text = parts[payload_start..].join(" ");
+                    let payload_bytes = payload_text.as_bytes().to_vec();
+                    let payload_hex = encode_hex(&payload_bytes);
+                    if all_self_shortcut {
+                        if let Err(err) = cmd_send_all_self_with_payload(&rpc, &private_key, &address, &payload_bytes).await {
+                            log_tx_failure(
+                                "send-payload",
+                                &rpc,
+                                &address,
+                                format!("to_address={} amount_mode=all_self payload_hex={}", address, payload_hex),
+                                &err,
+                            );
+                            println!("error: {err}");
+                        }
+                    } else {
+                        let amount_sompi = match parse_amount_cli_arg("amount", parts[amount_arg_index], amount_unit) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                println!("error: {err}");
+                                continue;
+                            }
+                        };
+                        if let Err(err) =
+                            cmd_send_with_payload(&rpc, &private_key, &address, to_address, amount_sompi, &payload_bytes).await
+                        {
+                            log_tx_failure(
+                                "send-payload",
+                                &rpc,
+                                &address,
+                                format!(
+                                    "to_address={} amount_sompi={} payload_hex={}",
+                                    to_address, amount_sompi, payload_hex
+                                ),
+                                &err,
+                            );
+                            println!("error: {err}");
+                        }
+                    }
                     continue;
                 }
                 if parts.len() >= 2 && parts[1] == "-s" {

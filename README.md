@@ -68,6 +68,8 @@ Inside console, run `help` and use:
 - `spend-contract-signed <compiled.json> <txid:vout> <input_amount> <function> <args.json> <outputs.json>`
 - `send -h` (show send options)
 - `send <to_address> <amount>`
+- `send -p [to_address] <amount> <payload_text...>` (UTF-8 payload, auto-hex encoded into tx payload; defaults to self when `to_address` is omitted)
+- `send -p <payload_text...>` (shortcut: no address/amount means send all available balance to self with payload)
 - `send -s <amount>` (self-send)
 - `send -c [max_inputs]` (compound UTXOs)
 - `history [limit]`
@@ -166,7 +168,7 @@ Default workspace under `kascov/contracts/`:
 
 ## Notes
 
-- Transaction-building commands use RPC fee estimate `priority_bucket` (fastest inclusion target): `send`, `send -s`, `send -c`, `deploy`, `spend-contract`, and `spend-contract-signed`.
+- Transaction-building commands use RPC fee estimate `priority_bucket` (fastest inclusion target): `send`, `send -p`, `send -s`, `send -c`, `deploy`, `spend-contract`, and `spend-contract-signed`.
 - `fees` prints current priority/normal/low feerate buckets from RPC.
 - `spend-contract` / `spend-contract-signed` enforce a minimum recommended fee for fastest policy; if outputs imply a lower fee, command returns an error and asks you to lower outputs total.
 - `.env` controls RPC and amount input unit (`KASPA_AMOUNT_UNIT`); wallet keys/addresses are selected in-console or via CLI flags.

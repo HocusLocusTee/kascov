@@ -683,6 +683,176 @@ pub async fn cmd_send(
     Ok(())
 }
 
+pub async fn cmd_send_with_payload(
+    rpc: &str,
+    private_key: &str,
+    from_address: &str,
+    to_address: &str,
+    amount_sompi: u64,
+    payload: &[u8],
+) -> Result<(), String> {
+    let from_address = parse_testnet_address(from_address)?;
+    let to_address = parse_testnet_address(to_address)?;
+    let keypair = parse_keypair(private_key)?;
+    let client = connect_grpc(rpc).await?;
+    let fee_policy = resolve_fee_policy(&client).await?;
+
+    let server = client.get_server_info().await.map_err(|err| format!("get_server_info failed: {err}"))?;
+    print_header("Send");
+    print_kv("network", server.network_id);
+    print_kv("synced", server.is_synced);
+    print_kv("from_address", &from_address);
+    print_kv("to_address", &to_address);
+
+    let utxos = client
+        .get_utxos_by_addresses(vec![from_address.clone()])
+        .await
+        .map_err(|err| format!("get_utxos_by_addresses failed: {err}"))?;
+    if utxos.is_empty() {
+        return Err("no UTXOs for source address".to_string());
+    }
+
+    let mut selected: Vec<(TransactionOutpoint, UtxoEntry)> = Vec::new();
+    let mut total_in = 0u64;
+    let mut sorted = utxos;
+    sorted.sort_by(|a, b| b.utxo_entry.amount.cmp(&a.utxo_entry.amount));
+
+    for item in sorted {
+        total_in += item.utxo_entry.amount;
+        selected.push((TransactionOutpoint::from(item.outpoint), UtxoEntry::from(item.utxo_entry)));
+        let need = amount_sompi + fee_sompi_for_policy(selected.len(), 2, fee_policy);
+        if total_in >= need {
+            break;
+        }
+    }
+
+    let tx_fee = fee_sompi_for_policy(selected.len(), 2, fee_policy);
+    let required = amount_sompi + tx_fee;
+    if total_in < required {
+        return Err(format!("insufficient funds: total_in={total_in} required={required}"));
+    }
+
+    let change = total_in - required;
+    let to_spk = pay_to_address_script(&to_address);
+    let change_spk = pay_to_address_script(&from_address);
+    let inputs: Vec<_> = selected
+        .iter()
+        .map(|(outpoint, _)| TransactionInput::new(*outpoint, vec![], 0, 1))
+        .collect();
+
+    let mut outputs = vec![TransactionOutput::new(amount_sompi, to_spk)];
+    if change > 0 {
+        outputs.push(TransactionOutput::new(change, change_spk));
+    }
+
+    let unsigned = Transaction::new(TX_VERSION, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, payload.to_vec());
+    let entries = selected.into_iter().map(|(_, entry)| entry).collect::<Vec<_>>();
+    let signed = sign(MutableTransaction::with_entries(unsigned, entries), keypair);
+
+    let txid = client
+        .submit_transaction((&signed.tx).into(), false)
+        .await
+        .map_err(|err| format!("submit_transaction failed: {err}"))?;
+
+    let payload_hex = payload.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    print_kv("submitted_txid", txid);
+    print_kv("amount_sompi", amount_sompi);
+    print_kv("fee_source", fee_policy.label());
+    print_kv("fee_sompi", tx_fee);
+    print_kv("change_sompi", change);
+    print_kv("payload_hex", &payload_hex);
+    save_tx_history(
+        "send-payload",
+        &txid.to_string(),
+        rpc,
+        &from_address.to_string(),
+        format!(
+            "to_address={} amount_sompi={} fee_sompi={} change_sompi={} payload_hex={}",
+            to_address, amount_sompi, tx_fee, change, payload_hex
+        ),
+    );
+
+    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    Ok(())
+}
+
+pub async fn cmd_send_all_self_with_payload(
+    rpc: &str,
+    private_key: &str,
+    address: &str,
+    payload: &[u8],
+) -> Result<(), String> {
+    let address = parse_testnet_address(address)?;
+    let keypair = parse_keypair(private_key)?;
+    let client = connect_grpc(rpc).await?;
+    let fee_policy = resolve_fee_policy(&client).await?;
+
+    let server = client.get_server_info().await.map_err(|err| format!("get_server_info failed: {err}"))?;
+    print_header("Send");
+    print_kv("network", server.network_id);
+    print_kv("synced", server.is_synced);
+    print_kv("from_address", &address);
+    print_kv("to_address", &address);
+
+    let utxos = client
+        .get_utxos_by_addresses(vec![address.clone()])
+        .await
+        .map_err(|err| format!("get_utxos_by_addresses failed: {err}"))?;
+    if utxos.is_empty() {
+        return Err("no UTXOs for source address".to_string());
+    }
+
+    let mut selected: Vec<(TransactionOutpoint, UtxoEntry)> = Vec::with_capacity(utxos.len());
+    let mut total_in = 0u64;
+    for item in utxos {
+        total_in += item.utxo_entry.amount;
+        selected.push((TransactionOutpoint::from(item.outpoint), UtxoEntry::from(item.utxo_entry)));
+    }
+
+    let tx_fee = fee_sompi_for_policy(selected.len(), 1, fee_policy);
+    if total_in <= tx_fee {
+        return Err(format!("insufficient funds: total_in={total_in} required_fee={tx_fee}"));
+    }
+    let amount_sompi = total_in - tx_fee;
+
+    let spk = pay_to_address_script(&address);
+    let inputs: Vec<_> = selected
+        .iter()
+        .map(|(outpoint, _)| TransactionInput::new(*outpoint, vec![], 0, 1))
+        .collect();
+    let outputs = vec![TransactionOutput::new(amount_sompi, spk)];
+
+    let unsigned = Transaction::new(TX_VERSION, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, payload.to_vec());
+    let entries = selected.into_iter().map(|(_, entry)| entry).collect::<Vec<_>>();
+    let signed = sign(MutableTransaction::with_entries(unsigned, entries), keypair);
+
+    let txid = client
+        .submit_transaction((&signed.tx).into(), false)
+        .await
+        .map_err(|err| format!("submit_transaction failed: {err}"))?;
+
+    let payload_hex = payload.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    print_kv("submitted_txid", txid);
+    print_kv("amount_sompi", amount_sompi);
+    print_kv("fee_source", fee_policy.label());
+    print_kv("fee_sompi", tx_fee);
+    print_kv("change_sompi", 0);
+    print_kv("payload_hex", &payload_hex);
+    save_tx_history(
+        "send-payload",
+        &txid.to_string(),
+        rpc,
+        &address.to_string(),
+        format!(
+            "to_address={} amount_sompi={} fee_sompi={} change_sompi=0 payload_hex={} amount_mode=all_self",
+            address, amount_sompi, tx_fee, payload_hex
+        ),
+    );
+
+    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    Ok(())
+}
+
 fn parse_outpoint_text(outpoint: &str) -> Result<TransactionOutpoint, String> {
     let mut parts = outpoint.split(':');
     let txid_text = parts.next().ok_or_else(|| "outpoint must be in txid:vout format".to_string())?;
