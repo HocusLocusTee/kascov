@@ -160,8 +160,9 @@ pub fn cmd_compile_sil(source: &str, out: Option<&str>, constructor_args_path: O
 pub fn cmd_compile_sil_with_args(source: &str, out: Option<&str>, constructor_args: Vec<Expr>) -> Result<(), String> {
     let source_text = fs::read_to_string(source).map_err(|err| format!("failed to read source file {source}: {err}"))?;
 
+    let compile_options = CompileOptions { allow_yield: true, ..CompileOptions::default() };
     let compiled =
-        compile_contract(&source_text, &constructor_args, CompileOptions::default()).map_err(|err| format!("compile error: {err}"))?;
+        compile_contract(&source_text, &constructor_args, compile_options).map_err(|err| format!("compile error: {err}"))?;
 
     let output_path = out
         .map(|value| value.to_string())
@@ -247,7 +248,8 @@ pub fn cmd_compile_contracts(contracts_dir: &str, out_dir: &str) -> Result<(), S
         let source_text = fs::read_to_string(source_path)
             .map_err(|err| format!("failed to read source file {}: {err}", source_path.display()))?;
         let (constructor_args, constructor_args_path) = constructor_args_for_batch_contract(contracts_path, source_path)?;
-        let compiled = compile_contract(&source_text, &constructor_args, CompileOptions::default())
+        let compile_options = CompileOptions { allow_yield: true, ..CompileOptions::default() };
+        let compiled = compile_contract(&source_text, &constructor_args, compile_options)
             .map_err(|err| format!("compile error in {}: {err}", source_path.display()))?;
         let json = serde_json::to_string_pretty(&compiled).map_err(|err| format!("failed to serialize output: {err}"))?;
         fs::write(&output_path, json).map_err(|err| format!("failed to write output {}: {err}", output_path.display()))?;

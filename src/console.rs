@@ -1,4 +1,5 @@
 use rustyline::error::ReadlineError;
+use secp256k1::{Keypair, SecretKey};
 use silverscript_lang::{ast::{Expr, parse_contract_ast}, compiler::CompiledContract};
 use std::fs;
 use std::io::{self, Write};
@@ -110,7 +111,10 @@ fn print_wallet_help() {
     println!("  switch active wallet for the session");
     println!();
     println!("usage: wallet pk");
-    println!("  show active wallet private key (sensitive)");
+    println!("  show active wallet private key and derived public key (sensitive)");
+    println!();
+    println!("usage: wallet sig <digest32_hex>");
+    println!("  sign a 32-byte digest with active wallet key");
     println!();
     println!("usage: wallet delete <index>");
     println!("  delete a saved wallet after confirmation");
@@ -221,6 +225,46 @@ fn decode_hex_bytes(input: &str) -> Result<Vec<u8>, String> {
         out.push(byte);
     }
     Ok(out)
+}
+
+fn decode_hex_32(input: &str) -> Result<[u8; 32], String> {
+    let value = input.strip_prefix("0x").unwrap_or(input);
+    if value.len() != 64 {
+        return Err("private key must be 32-byte hex".to_string());
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        let idx = i * 2;
+        out[i] = u8::from_str_radix(&value[idx..idx + 2], 16).map_err(|err| format!("invalid hex: {err}"))?;
+    }
+    Ok(out)
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+}
+
+fn public_key_from_private_key_hex(private_key_hex: &str) -> Result<String, String> {
+    let bytes = decode_hex_32(private_key_hex)?;
+    let secret = SecretKey::from_slice(&bytes).map_err(|err| format!("invalid private key: {err}"))?;
+    let keypair = Keypair::from_secret_key(secp256k1::SECP256K1, &secret);
+    Ok(encode_hex(&keypair.x_only_public_key().0.serialize()))
+}
+
+fn sign_digest_with_private_key_hex(private_key_hex: &str, digest_hex: &str) -> Result<(String, String, String), String> {
+    let digest = decode_hex_bytes(digest_hex)?;
+    if digest.len() != 32 {
+        return Err("digest must be 32-byte hex".to_string());
+    }
+    let bytes = decode_hex_32(private_key_hex)?;
+    let secret = SecretKey::from_slice(&bytes).map_err(|err| format!("invalid private key: {err}"))?;
+    let keypair = Keypair::from_secret_key(secp256k1::SECP256K1, &secret);
+    let msg = secp256k1::Message::from_digest_slice(&digest).map_err(|err| format!("invalid digest: {err}"))?;
+    let schnorr_sig = keypair.sign_schnorr(msg);
+    let sig64 = encode_hex(schnorr_sig.as_ref());
+    let mut sig65 = schnorr_sig.as_ref().to_vec();
+    sig65.push(0x01);
+    Ok((encode_hex(&keypair.x_only_public_key().0.serialize()), sig64, encode_hex(&sig65)))
 }
 
 fn decode_decimal_byte_list(input: &str) -> Result<Vec<u8>, String> {
@@ -1079,6 +1123,26 @@ pub async fn cmd_console(
                     print_kv("name", &selected_wallet_name);
                     print_kv("address", &address);
                     print_kv("private_key", &private_key);
+                    match public_key_from_private_key_hex(&private_key) {
+                        Ok(public_key) => print_kv("public_key", &public_key),
+                        Err(err) => print_kv("public_key_error", &err),
+                    }
+                    continue;
+                }
+                if parts.len() == 3 && parts[1] == "sig" {
+                    print_header("Wallet Signature");
+                    println!("warning: only sign trusted digests");
+                    match sign_digest_with_private_key_hex(&private_key, parts[2]) {
+                        Ok((public_key, signature_schnorr64_hex, signature_schnorr65_sighashall_hex)) => {
+                            print_kv("name", &selected_wallet_name);
+                            print_kv("address", &address);
+                            print_kv("public_key", public_key);
+                            print_kv("digest_hex", parts[2]);
+                            print_kv("signature_schnorr64_hex", signature_schnorr64_hex);
+                            print_kv("signature_schnorr65_sighashall_hex", signature_schnorr65_sighashall_hex);
+                        }
+                        Err(err) => println!("error: {err}"),
+                    }
                     continue;
                 }
                 if parts.len() == 3 && parts[1] == "use" {
