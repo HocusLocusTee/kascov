@@ -1,6 +1,9 @@
 # kascov (console-only)
 
-Codex coded CLI App to interact with kas covenants testnet.
+Codex-coded CLI app to interact with Kaspa testnets.
+Supports covenants.
+Ideally used for quick actions, spending, payloads, and compiling/deploying covenants.
+
 
 **Warning: Do not use or modify for use on mainnet or real funds.**
 
@@ -49,10 +52,10 @@ Inside console, run `help` and use:
 - `wallet delete <index>` (asks for `yes` confirmation; wallet indexes start at `1`)
 - `fees` (show current RPC fee estimate buckets)
 - `balance`
-- `utxos` (summary count + totals)
+- `utxos [-h]` (summary count + totals; `detail` variant documented in `utxos -h`)
 - `utxos detail` (full list)
 - `pending-txs`
-- `tx-status <txid|b|last>`
+- `tx-status [-h]`
 - `contracts` (interactive `.sil` contract browser and source viewer)
 - `contracts <path.sil>` (print one contract source file)
 - `compile <source.sil> [out.json] [constructor_args.json]` (default output goes to current compiled dir)
@@ -70,6 +73,8 @@ Inside console, run `help` and use:
 - `send <to_address> <amount>`
 - `send -p [to_address] <amount> <payload_text...>` (UTF-8 payload, auto-hex encoded into tx payload; defaults to self when `to_address` is omitted)
 - `send -p <payload_text...>` (shortcut: no address/amount means send all available balance to self with payload)
+- `send -p -h [to_address] <amount> <payload_hex...>` (raw hex payload bytes, no UTF-8 conversion; invalid/malformed payload may fail downstream)
+- `send -p -h <payload_hex...>` (shortcut: no address/amount means send all available balance to self with raw payload)
 - `send -s <amount>` (self-send)
 - `send -c [max_inputs]` (compound UTXOs)
 - `history [limit]`
@@ -79,6 +84,8 @@ Inside console, run `help` and use:
 Per-command help:
 - `config -h`
 - `wallet -h`
+- `utxos -h`
+- `tx-status -h`
 - `compile -h`
 - `contracts -h`
 - `deploy -h`

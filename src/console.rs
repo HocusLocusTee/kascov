@@ -52,29 +52,41 @@ impl AmountUnit {
 fn print_console_help() {
     println!("commands:");
     println!("  help");
-    println!("  clear");
     println!("  config [-h]");
     println!("  wallet [-h]");
     println!("  fees");
     println!("  balance");
-    println!("  utxos [detail]");
+    println!("  utxos [-h]");
     println!("  pending-txs");
-    println!("  tx-status <txid|b|last>");
+    println!("  tx-status [-h]");
     println!("  contracts [-h]");
     println!("  compile [-h]");
-    println!("    compile -i");
-    println!("    compile -i <source.sil> [out.json]");
-    println!("    compile all [contracts_dir] [compiled_dir]");
     println!("  deploy [-h]");
-    println!("    deploy -i");
-    println!("  spend-contract <compiled.json> <txid:vout> <input_amount> <function> <args.json|-> <outputs.json>");
-    println!("    spend-contract -i");
-    println!("    spend-contract -i <compiled.json> <txid:vout> <input_amount> <function> <outputs.json>");
-    println!("    spend-contract-signed <compiled.json> <txid:vout> <input_amount> <function> <args.json> <outputs.json>");
+    println!("  spend-contract [-h]");
     println!("  send [-h]");
     println!("  history [limit]");
+    println!("  clear");
     println!("  back");
     println!("  quit | exit");
+}
+
+fn print_utxos_help() {
+    println!("usage: utxos");
+    println!("  show summary (count + totals)");
+    println!();
+    println!("usage: utxos detail");
+    println!("  show full UTXO list with details");
+    println!();
+    println!("usage: utxos -h");
+    println!("  show this help");
+}
+
+fn print_tx_status_help() {
+    println!("usage: tx-status <txid|b|last>");
+    println!("  query mempool status for txid, browse history (`b`), or use most recent (`last`)");
+    println!();
+    println!("usage: tx-status -h");
+    println!("  show this help");
 }
 
 fn print_contracts_help() {
@@ -159,6 +171,11 @@ fn print_send_help() {
     println!("  omit to_address to send to self");
     println!("  shortcut: send -p <payload_text...> sends all available balance to self with payload");
     println!();
+    println!("usage: send -p -h [to_address] <amount> <payload_hex...>");
+    println!("  send tx with raw hex payload bytes (no UTF-8 conversion)");
+    println!("  note: malformed/unexpected raw payload may fail downstream depending on policy");
+    println!("  shortcut: send -p -h <payload_hex...> sends all available balance to self with raw payload");
+    println!();
     println!("usage: send -s <amount>");
     println!("  self-send: send from active wallet back to the same address");
     println!();
@@ -169,6 +186,8 @@ fn print_send_help() {
     println!("example: send kaspatest:qp... 250000000");
     println!("example: send -p kaspatest:qp... 1000000 hello kaspa");
     println!("example: send -p 1000000 hello from self");
+    println!("example: send -p -h kaspatest:qp... 1000000 deadbeef");
+    println!("example: send -p -h deadbeef");
     println!("example: send -s 100000000");
     println!("example: send -c 900");
 }
@@ -1249,13 +1268,17 @@ pub async fn cmd_console(
                 }
             }
             "utxos" => {
+                if parts.len() == 2 && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help") {
+                    print_utxos_help();
+                    continue;
+                }
                 if parts.len() > 2 {
-                    println!("usage: utxos [detail]");
+                    print_utxos_help();
                     continue;
                 }
                 let detail = parts.len() == 2 && parts[1] == "detail";
                 if parts.len() == 2 && !detail {
-                    println!("usage: utxos [detail]");
+                    print_utxos_help();
                     continue;
                 }
                 if let Err(err) = cmd_utxos(&rpc, &address, detail).await {
@@ -1268,8 +1291,12 @@ pub async fn cmd_console(
                 }
             }
             "tx-status" => {
+                if parts.len() == 2 && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help") {
+                    print_tx_status_help();
+                    continue;
+                }
                 if parts.len() != 2 {
-                    println!("usage: tx-status <txid|b|last>");
+                    print_tx_status_help();
                     continue;
                 }
                 let result = match parts[1] {
@@ -1618,31 +1645,59 @@ pub async fn cmd_console(
                         print_send_help();
                         continue;
                     }
+                    let raw_payload_mode = parts[2] == "-h";
+                    let base_index = if raw_payload_mode { 3 } else { 2 };
+                    if parts.len() <= base_index {
+                        println!(
+                            "error: missing {} payload for send -p{}",
+                            if raw_payload_mode { "raw hex" } else { "text" },
+                            if raw_payload_mode { " -h" } else { "" }
+                        );
+                        continue;
+                    }
                     let mut to_address = address.as_str();
                     let (amount_arg_index, payload_start, all_self_shortcut) =
-                        if parts[2].starts_with("kaspatest:") || parts[2].starts_with("kaspa:") {
-                            if parts.len() < 5 {
-                                println!("error: missing amount or payload text for send -p");
+                        if parts[base_index].starts_with("kaspatest:") || parts[base_index].starts_with("kaspa:") {
+                            if parts.len() < base_index + 3 {
+                                println!(
+                                    "error: missing amount or payload {} for send -p{}",
+                                    if raw_payload_mode { "hex" } else { "text" },
+                                    if raw_payload_mode { " -h" } else { "" }
+                                );
                                 continue;
                             }
-                            if let Err(err) = parse_testnet_address(parts[2]) {
+                            if let Err(err) = parse_testnet_address(parts[base_index]) {
                                 println!("error: invalid to_address: {err}");
                                 continue;
                             }
-                            to_address = parts[2];
-                            (3, 4, false)
+                            to_address = parts[base_index];
+                            (base_index + 1, base_index + 2, false)
                         } else {
-                            match parse_amount_cli_arg("amount", parts[2], amount_unit) {
-                                Ok(_) => (2, 3, false),
-                                Err(_) => (0, 2, true),
+                            match parse_amount_cli_arg("amount", parts[base_index], amount_unit) {
+                                Ok(_) => (base_index, base_index + 1, false),
+                                Err(_) => (0, base_index, true),
                             }
                         };
                     if parts.len() <= payload_start {
-                        println!("error: payload text is required");
+                        println!(
+                            "error: {} payload is required",
+                            if raw_payload_mode { "raw hex" } else { "text" }
+                        );
                         continue;
                     }
-                    let payload_text = parts[payload_start..].join(" ");
-                    let payload_bytes = payload_text.as_bytes().to_vec();
+                    let payload_bytes = if raw_payload_mode {
+                        let payload_hex_input = parts[payload_start..].join(" ");
+                        match decode_hex_bytes(&payload_hex_input) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                println!("error: invalid raw payload hex: {err}");
+                                continue;
+                            }
+                        }
+                    } else {
+                        let payload_text = parts[payload_start..].join(" ");
+                        payload_text.as_bytes().to_vec()
+                    };
                     let payload_hex = encode_hex(&payload_bytes);
                     if all_self_shortcut {
                         if let Err(err) = cmd_send_all_self_with_payload(&rpc, &private_key, &address, &payload_bytes).await {
