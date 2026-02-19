@@ -338,7 +338,7 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<Expr, String> {
             return Ok(Expr::Array(items));
         }
         if inner_type == "byte" {
-            return Ok(Expr::Bytes(decode_hex_bytes(value)?));
+            return Ok(Expr::from(decode_hex_bytes(value)?));
         }
         return Err(format!("unsupported interactive array type: {type_name}"));
     }
@@ -356,9 +356,9 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<Expr, String> {
         "string" => Ok(Expr::String(value.to_string())),
         "bytes" => {
             if let Some(text) = value.strip_prefix("utf8:") {
-                Ok(Expr::Bytes(text.as_bytes().to_vec()))
+                Ok(Expr::from(text.as_bytes().to_vec()))
             } else {
-                Ok(Expr::Bytes(parse_bytes_input(value)?))
+                Ok(Expr::from(parse_bytes_input(value)?))
             }
         }
         "byte" => {
@@ -366,21 +366,21 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<Expr, String> {
             if bytes.len() != 1 {
                 return Err("byte requires exactly 1 byte".to_string());
             }
-            Ok(Expr::Bytes(bytes))
+            Ok(Expr::Byte(bytes[0]))
         }
         "pubkey" => {
             let bytes = parse_bytes_input(value)?;
             if bytes.len() != 32 {
                 return Err("pubkey requires exactly 32 bytes".to_string());
             }
-            Ok(Expr::Bytes(bytes))
+            Ok(Expr::from(bytes))
         }
         "sig" | "datasig" => {
             let bytes = parse_bytes_input(value)?;
             if bytes.len() != 64 && bytes.len() != 65 {
                 return Err(format!("{type_name} requires 64 or 65 bytes"));
             }
-            Ok(Expr::Bytes(bytes))
+            Ok(Expr::from(bytes))
         }
         _ => {
             if let Some(size) = type_name.strip_prefix("bytes").and_then(|n| n.parse::<usize>().ok()) {
@@ -388,7 +388,7 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<Expr, String> {
                 if bytes.len() != size {
                     return Err(format!("{type_name} requires exactly {size} bytes"));
                 }
-                Ok(Expr::Bytes(bytes))
+                Ok(Expr::from(bytes))
             } else {
                 Err(format!("unsupported interactive type: {type_name}"))
             }
@@ -882,7 +882,7 @@ fn cmd_compile_interactive(contracts_dir: &str, out_dir: &str) -> Result<(), Str
     let params = contract_ast
         .params
         .iter()
-        .map(|param| (param.name.clone(), param.type_name.clone()))
+        .map(|param| (param.name.clone(), param.type_ref.type_name()))
         .collect::<Vec<_>>();
     let constructor_args = match prompt_for_typed_args(&params, "Constructor Args")? {
         Some(value) => value,
@@ -1343,7 +1343,7 @@ pub async fn cmd_console(
                     let params = contract_ast
                         .params
                         .iter()
-                        .map(|param| (param.name.clone(), param.type_name.clone()))
+                        .map(|param| (param.name.clone(), param.type_ref.type_name()))
                         .collect::<Vec<_>>();
                     let constructor_args = match prompt_for_typed_args(&params, "Constructor Args") {
                         Ok(Some(value)) => value,

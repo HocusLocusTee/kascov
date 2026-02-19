@@ -984,8 +984,8 @@ fn build_spend_contract_tx(
 fn resolve_signed_arg_placeholders(expr: Expr, pubkey: &[u8], signature: &[u8]) -> Expr {
     match expr {
         Expr::Identifier(name) => match name.as_str() {
-            "$pubkey" => Expr::Bytes(pubkey.to_vec()),
-            "$sig" => Expr::Bytes(signature.to_vec()),
+            "$pubkey" => Expr::from(pubkey.to_vec()),
+            "$sig" => Expr::from(signature.to_vec()),
             _ => Expr::Identifier(name),
         },
         Expr::Array(items) => Expr::Array(
