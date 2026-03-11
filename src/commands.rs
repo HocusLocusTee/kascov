@@ -1,15 +1,19 @@
 use kaspa_consensus_core::{
     constants::TX_VERSION,
-    hashing::sighash::{SigHashReusedValuesUnsync, calc_schnorr_signature_hash},
+    hashing::sighash::{calc_schnorr_signature_hash, SigHashReusedValuesUnsync},
     hashing::sighash_type::SIG_HASH_ALL,
     sign::sign,
     subnets::SUBNETWORK_ID_NATIVE,
-    tx::{MutableTransaction, ScriptPublicKey, Transaction, TransactionId, TransactionInput, TransactionOutpoint, TransactionOutput, UtxoEntry},
+    tx::{
+        MutableTransaction, ScriptPublicKey, Transaction, TransactionId, TransactionInput,
+        TransactionOutpoint, TransactionOutput, UtxoEntry,
+    },
 };
 use kaspa_grpc_client::GrpcClient;
 use kaspa_rpc_core::{api::rpc::RpcApi, notify::mode::NotificationMode};
 use kaspa_txscript::{
-    extract_script_pub_key_address, pay_to_address_script, pay_to_script_hash_script, pay_to_script_hash_signature_script,
+    extract_script_pub_key_address, pay_to_address_script, pay_to_script_hash_script,
+    pay_to_script_hash_signature_script,
 };
 use secp256k1::{Keypair, Message, SecretKey};
 use serde::Deserialize;
@@ -141,34 +145,51 @@ fn decode_hex_bytes(input: &str) -> Result<Vec<u8>, String> {
     }
     let mut out = Vec::with_capacity(hex.len() / 2);
     for i in (0..hex.len()).step_by(2) {
-        let byte = u8::from_str_radix(&hex[i..i + 2], 16).map_err(|err| format!("invalid hex at byte {}: {err}", i / 2))?;
+        let byte = u8::from_str_radix(&hex[i..i + 2], 16)
+            .map_err(|err| format!("invalid hex at byte {}: {err}", i / 2))?;
         out.push(byte);
     }
     Ok(out)
 }
 
-pub fn cmd_compile_sil(source: &str, out: Option<&str>, constructor_args_path: Option<&str>) -> Result<(), String> {
+pub fn cmd_compile_sil(
+    source: &str,
+    out: Option<&str>,
+    constructor_args_path: Option<&str>,
+) -> Result<(), String> {
     let constructor_args = if let Some(path) = constructor_args_path {
-        let json = fs::read_to_string(path).map_err(|err| format!("failed to read constructor args {path}: {err}"))?;
-        serde_json::from_str::<Vec<Expr>>(&json).map_err(|err| format!("failed to parse constructor args {path}: {err}"))?
+        let json = fs::read_to_string(path)
+            .map_err(|err| format!("failed to read constructor args {path}: {err}"))?;
+        serde_json::from_str::<Vec<Expr>>(&json)
+            .map_err(|err| format!("failed to parse constructor args {path}: {err}"))?
     } else {
         Vec::new()
     };
     cmd_compile_sil_with_args(source, out, constructor_args)
 }
 
-pub fn cmd_compile_sil_with_args(source: &str, out: Option<&str>, constructor_args: Vec<Expr>) -> Result<(), String> {
-    let source_text = fs::read_to_string(source).map_err(|err| format!("failed to read source file {source}: {err}"))?;
+pub fn cmd_compile_sil_with_args(
+    source: &str,
+    out: Option<&str>,
+    constructor_args: Vec<Expr>,
+) -> Result<(), String> {
+    let source_text = fs::read_to_string(source)
+        .map_err(|err| format!("failed to read source file {source}: {err}"))?;
 
-    let compile_options = CompileOptions { allow_yield: true, ..CompileOptions::default() };
-    let compiled =
-        compile_contract(&source_text, &constructor_args, compile_options).map_err(|err| format!("compile error: {err}"))?;
+    let compile_options = CompileOptions {
+        allow_yield: true,
+        ..CompileOptions::default()
+    };
+    let compiled = compile_contract(&source_text, &constructor_args, compile_options)
+        .map_err(|err| format!("compile error: {err}"))?;
 
     let output_path = out
         .map(|value| value.to_string())
         .unwrap_or_else(|| default_sil_output_path(source));
-    let json = serde_json::to_string_pretty(&compiled).map_err(|err| format!("failed to serialize output: {err}"))?;
-    fs::write(&output_path, json).map_err(|err| format!("failed to write output {output_path}: {err}"))?;
+    let json = serde_json::to_string_pretty(&compiled)
+        .map_err(|err| format!("failed to serialize output: {err}"))?;
+    fs::write(&output_path, json)
+        .map_err(|err| format!("failed to write output {output_path}: {err}"))?;
     println!("compiled={source}");
     println!("output={output_path}");
     Ok(())
@@ -178,9 +199,12 @@ fn constructor_args_for_batch_contract(
     contracts_path: &Path,
     source_path: &Path,
 ) -> Result<(Vec<Expr>, Option<PathBuf>), String> {
-    let relative = source_path
-        .strip_prefix(contracts_path)
-        .map_err(|err| format!("failed to map relative path for {}: {err}", source_path.display()))?;
+    let relative = source_path.strip_prefix(contracts_path).map_err(|err| {
+        format!(
+            "failed to map relative path for {}: {err}",
+            source_path.display()
+        )
+    })?;
 
     let params_parent = contracts_path.parent().unwrap_or_else(|| Path::new("."));
     let params_root = if params_parent.join("params").exists() {
@@ -193,11 +217,22 @@ fn constructor_args_for_batch_contract(
     let stem = relative_without_ext
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| format!("failed to resolve contract stem for {}", source_path.display()))?;
-    let rel_parent = relative_without_ext.parent().unwrap_or_else(|| Path::new(""));
+        .ok_or_else(|| {
+            format!(
+                "failed to resolve contract stem for {}",
+                source_path.display()
+            )
+        })?;
+    let rel_parent = relative_without_ext
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
 
-    let ctor_candidate = params_root.join(rel_parent).join(format!("{stem}_ctor.json"));
-    let plain_candidate = params_root.join(&relative_without_ext).with_extension("json");
+    let ctor_candidate = params_root
+        .join(rel_parent)
+        .join(format!("{stem}_ctor.json"));
+    let plain_candidate = params_root
+        .join(&relative_without_ext)
+        .with_extension("json");
 
     let constructor_args_path = if ctor_candidate.exists() {
         Some(ctor_candidate)
@@ -208,8 +243,8 @@ fn constructor_args_for_batch_contract(
     };
 
     let constructor_args = if let Some(path) = constructor_args_path.as_ref() {
-        let json =
-            fs::read_to_string(path).map_err(|err| format!("failed to read constructor args {}: {err}", path.display()))?;
+        let json = fs::read_to_string(path)
+            .map_err(|err| format!("failed to read constructor args {}: {err}", path.display()))?;
         serde_json::from_str::<Vec<Expr>>(&json)
             .map_err(|err| format!("failed to parse constructor args {}: {err}", path.display()))?
     } else {
@@ -224,7 +259,8 @@ pub fn cmd_compile_contracts(contracts_dir: &str, out_dir: &str) -> Result<(), S
     if !contracts_path.exists() {
         return Err(format!("contracts dir does not exist: {contracts_dir}"));
     }
-    fs::create_dir_all(out_dir).map_err(|err| format!("failed to create output dir {out_dir}: {err}"))?;
+    fs::create_dir_all(out_dir)
+        .map_err(|err| format!("failed to create output dir {out_dir}: {err}"))?;
 
     let mut compiled_count = 0usize;
     for entry in WalkDir::new(contracts_path) {
@@ -237,22 +273,36 @@ pub fn cmd_compile_contracts(contracts_dir: &str, out_dir: &str) -> Result<(), S
             continue;
         }
 
-        let relative = source_path
-            .strip_prefix(contracts_path)
-            .map_err(|err| format!("failed to map relative path for {}: {err}", source_path.display()))?;
+        let relative = source_path.strip_prefix(contracts_path).map_err(|err| {
+            format!(
+                "failed to map relative path for {}: {err}",
+                source_path.display()
+            )
+        })?;
         let mut output_path: PathBuf = Path::new(out_dir).join(relative);
         output_path.set_extension("json");
         if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent).map_err(|err| format!("failed to create dir {}: {err}", parent.display()))?;
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create dir {}: {err}", parent.display()))?;
         }
-        let source_text = fs::read_to_string(source_path)
-            .map_err(|err| format!("failed to read source file {}: {err}", source_path.display()))?;
-        let (constructor_args, constructor_args_path) = constructor_args_for_batch_contract(contracts_path, source_path)?;
-        let compile_options = CompileOptions { allow_yield: true, ..CompileOptions::default() };
+        let source_text = fs::read_to_string(source_path).map_err(|err| {
+            format!(
+                "failed to read source file {}: {err}",
+                source_path.display()
+            )
+        })?;
+        let (constructor_args, constructor_args_path) =
+            constructor_args_for_batch_contract(contracts_path, source_path)?;
+        let compile_options = CompileOptions {
+            allow_yield: true,
+            ..CompileOptions::default()
+        };
         let compiled = compile_contract(&source_text, &constructor_args, compile_options)
             .map_err(|err| format!("compile error in {}: {err}", source_path.display()))?;
-        let json = serde_json::to_string_pretty(&compiled).map_err(|err| format!("failed to serialize output: {err}"))?;
-        fs::write(&output_path, json).map_err(|err| format!("failed to write output {}: {err}", output_path.display()))?;
+        let json = serde_json::to_string_pretty(&compiled)
+            .map_err(|err| format!("failed to serialize output: {err}"))?;
+        fs::write(&output_path, json)
+            .map_err(|err| format!("failed to write output {}: {err}", output_path.display()))?;
         println!("compiled={}", source_path.display());
         if let Some(path) = constructor_args_path {
             println!("constructor_args={}", path.display());
@@ -268,7 +318,11 @@ pub fn cmd_compile_contracts(contracts_dir: &str, out_dir: &str) -> Result<(), S
 }
 
 async fn connect_grpc(rpc: &str) -> Result<GrpcClient, String> {
-    let endpoint = if rpc.starts_with("grpc://") { rpc.to_string() } else { format!("grpc://{rpc}") };
+    let endpoint = if rpc.starts_with("grpc://") {
+        rpc.to_string()
+    } else {
+        format!("grpc://{rpc}")
+    };
     GrpcClient::connect_with_args(
         NotificationMode::Direct,
         endpoint,
@@ -287,7 +341,10 @@ pub async fn cmd_balance(rpc: &str, address: &str) -> Result<(), String> {
     let address = parse_testnet_address(address)?;
     let client = connect_grpc(rpc).await?;
 
-    let server = client.get_server_info().await.map_err(|err| format!("get_server_info failed: {err}"))?;
+    let server = client
+        .get_server_info()
+        .await
+        .map_err(|err| format!("get_server_info failed: {err}"))?;
     let entries = client
         .get_utxos_by_addresses(vec![address.clone()])
         .await
@@ -300,7 +357,10 @@ pub async fn cmd_balance(rpc: &str, address: &str) -> Result<(), String> {
     let total_sompi: u64 = entries.iter().map(|entry| entry.utxo_entry.amount).sum();
     let mut confirmed_outpoint_amounts = HashMap::new();
     for entry in &entries {
-        confirmed_outpoint_amounts.insert((entry.outpoint.transaction_id, entry.outpoint.index), entry.utxo_entry.amount);
+        confirmed_outpoint_amounts.insert(
+            (entry.outpoint.transaction_id, entry.outpoint.index),
+            entry.utxo_entry.amount,
+        );
     }
 
     let mut pending_spent_outpoints = HashSet::new();
@@ -309,7 +369,10 @@ pub async fn cmd_balance(rpc: &str, address: &str) -> Result<(), String> {
     for by_addr in mempool_entries {
         for sending in by_addr.sending {
             for input in sending.transaction.inputs {
-                let key = (input.previous_outpoint.transaction_id, input.previous_outpoint.index);
+                let key = (
+                    input.previous_outpoint.transaction_id,
+                    input.previous_outpoint.index,
+                );
                 if pending_spent_outpoints.insert(key) {
                     if let Some(amount) = confirmed_outpoint_amounts.get(&key) {
                         pending_spent_sompi = pending_spent_sompi.saturating_add(*amount);
@@ -351,9 +414,15 @@ pub async fn cmd_balance(rpc: &str, address: &str) -> Result<(), String> {
     print_kv("effective_sompi", effective_sompi);
     let effective_whole = effective_sompi / 100_000_000;
     let effective_frac = effective_sompi % 100_000_000;
-    print_kv("effective_kas", format!("{effective_whole}.{effective_frac:08}"));
+    print_kv(
+        "effective_kas",
+        format!("{effective_whole}.{effective_frac:08}"),
+    );
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
@@ -361,7 +430,10 @@ pub async fn cmd_utxos(rpc: &str, address: &str, detail: bool) -> Result<(), Str
     let address = parse_testnet_address(address)?;
     let client = connect_grpc(rpc).await?;
 
-    let server = client.get_server_info().await.map_err(|err| format!("get_server_info failed: {err}"))?;
+    let server = client
+        .get_server_info()
+        .await
+        .map_err(|err| format!("get_server_info failed: {err}"))?;
     let entries = client
         .get_utxos_by_addresses(vec![address.clone()])
         .await
@@ -393,7 +465,10 @@ pub async fn cmd_utxos(rpc: &str, address: &str, detail: bool) -> Result<(), Str
     }
     print_kv("total_sompi", total);
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
@@ -460,10 +535,16 @@ pub async fn cmd_pending_txs(rpc: &str, address: &str) -> Result<(), String> {
             _ => "unknown",
         };
         println!("  - {txid}");
-        println!("    direction={direction} fee={} orphan={} inputs={} outputs={}", row.fee, row.orphan, row.inputs, row.outputs);
+        println!(
+            "    direction={direction} fee={} orphan={} inputs={} outputs={}",
+            row.fee, row.orphan, row.inputs, row.outputs
+        );
     }
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
@@ -487,18 +568,30 @@ pub async fn cmd_tx_status(rpc: &str, txid: &str) -> Result<(), String> {
         }
     }
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
 pub async fn cmd_fee_estimate(rpc: &str) -> Result<(), String> {
     let client = connect_grpc(rpc).await?;
-    let estimate = client.get_fee_estimate().await.map_err(|err| format!("get_fee_estimate failed: {err}"))?;
+    let estimate = client
+        .get_fee_estimate()
+        .await
+        .map_err(|err| format!("get_fee_estimate failed: {err}"))?;
 
     print_header("Fee Estimate");
     print_kv("policy_default", "priority_bucket (fastest)");
-    print_kv("priority_feerate_sompi_per_gram", estimate.priority_bucket.feerate);
-    print_kv("priority_estimated_seconds", estimate.priority_bucket.estimated_seconds);
+    print_kv(
+        "priority_feerate_sompi_per_gram",
+        estimate.priority_bucket.feerate,
+    );
+    print_kv(
+        "priority_estimated_seconds",
+        estimate.priority_bucket.estimated_seconds,
+    );
 
     if let Some(bucket) = estimate.normal_buckets.first() {
         print_kv("normal_feerate_sompi_per_gram", bucket.feerate);
@@ -512,17 +605,28 @@ pub async fn cmd_fee_estimate(rpc: &str) -> Result<(), String> {
     print_kv("normal_bucket_count", estimate.normal_buckets.len());
     print_kv("low_bucket_count", estimate.low_buckets.len());
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
-pub async fn cmd_submit_self(rpc: &str, private_key: &str, address: &str, amount_sompi: u64) -> Result<(), String> {
+pub async fn cmd_submit_self(
+    rpc: &str,
+    private_key: &str,
+    address: &str,
+    amount_sompi: u64,
+) -> Result<(), String> {
     let address = parse_testnet_address(address)?;
     let keypair = parse_keypair(private_key)?;
     let client = connect_grpc(rpc).await?;
     let fee_policy = resolve_fee_policy(&client).await?;
 
-    let server = client.get_server_info().await.map_err(|err| format!("get_server_info failed: {err}"))?;
+    let server = client
+        .get_server_info()
+        .await
+        .map_err(|err| format!("get_server_info failed: {err}"))?;
     print_header("Submit Self");
     print_kv("network", server.network_id);
     print_kv("synced", server.is_synced);
@@ -542,7 +646,10 @@ pub async fn cmd_submit_self(rpc: &str, private_key: &str, address: &str, amount
 
     for item in sorted {
         total_in += item.utxo_entry.amount;
-        selected.push((TransactionOutpoint::from(item.outpoint), UtxoEntry::from(item.utxo_entry)));
+        selected.push((
+            TransactionOutpoint::from(item.outpoint),
+            UtxoEntry::from(item.utxo_entry),
+        ));
         let need = amount_sompi + fee_sompi_for_policy(selected.len(), 2, fee_policy);
         if total_in >= need {
             break;
@@ -552,7 +659,9 @@ pub async fn cmd_submit_self(rpc: &str, private_key: &str, address: &str, amount
     let tx_fee = fee_sompi_for_policy(selected.len(), 2, fee_policy);
     let required = amount_sompi + tx_fee;
     if total_in < required {
-        return Err(format!("insufficient funds: total_in={total_in} required={required}"));
+        return Err(format!(
+            "insufficient funds: total_in={total_in} required={required}"
+        ));
     }
 
     let change = total_in - required;
@@ -567,8 +676,19 @@ pub async fn cmd_submit_self(rpc: &str, private_key: &str, address: &str, amount
         outputs.push(TransactionOutput::new(change, spk));
     }
 
-    let unsigned = Transaction::new(TX_VERSION, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
-    let entries = selected.into_iter().map(|(_, entry)| entry).collect::<Vec<_>>();
+    let unsigned = Transaction::new(
+        TX_VERSION,
+        inputs,
+        outputs,
+        0,
+        SUBNETWORK_ID_NATIVE,
+        0,
+        vec![],
+    );
+    let entries = selected
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect::<Vec<_>>();
     let signed = sign(MutableTransaction::with_entries(unsigned, entries), keypair);
 
     let txid = client
@@ -589,7 +709,10 @@ pub async fn cmd_submit_self(rpc: &str, private_key: &str, address: &str, amount
         format!("amount_sompi={amount_sompi} fee_sompi={tx_fee} change_sompi={change}"),
     );
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
@@ -606,7 +729,10 @@ pub async fn cmd_send(
     let client = connect_grpc(rpc).await?;
     let fee_policy = resolve_fee_policy(&client).await?;
 
-    let server = client.get_server_info().await.map_err(|err| format!("get_server_info failed: {err}"))?;
+    let server = client
+        .get_server_info()
+        .await
+        .map_err(|err| format!("get_server_info failed: {err}"))?;
     print_header("Send");
     print_kv("network", server.network_id);
     print_kv("synced", server.is_synced);
@@ -628,7 +754,10 @@ pub async fn cmd_send(
 
     for item in sorted {
         total_in += item.utxo_entry.amount;
-        selected.push((TransactionOutpoint::from(item.outpoint), UtxoEntry::from(item.utxo_entry)));
+        selected.push((
+            TransactionOutpoint::from(item.outpoint),
+            UtxoEntry::from(item.utxo_entry),
+        ));
         let need = amount_sompi + fee_sompi_for_policy(selected.len(), 2, fee_policy);
         if total_in >= need {
             break;
@@ -638,7 +767,9 @@ pub async fn cmd_send(
     let tx_fee = fee_sompi_for_policy(selected.len(), 2, fee_policy);
     let required = amount_sompi + tx_fee;
     if total_in < required {
-        return Err(format!("insufficient funds: total_in={total_in} required={required}"));
+        return Err(format!(
+            "insufficient funds: total_in={total_in} required={required}"
+        ));
     }
 
     let change = total_in - required;
@@ -654,8 +785,19 @@ pub async fn cmd_send(
         outputs.push(TransactionOutput::new(change, change_spk));
     }
 
-    let unsigned = Transaction::new(TX_VERSION, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
-    let entries = selected.into_iter().map(|(_, entry)| entry).collect::<Vec<_>>();
+    let unsigned = Transaction::new(
+        TX_VERSION,
+        inputs,
+        outputs,
+        0,
+        SUBNETWORK_ID_NATIVE,
+        0,
+        vec![],
+    );
+    let entries = selected
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect::<Vec<_>>();
     let signed = sign(MutableTransaction::with_entries(unsigned, entries), keypair);
 
     let txid = client
@@ -679,7 +821,10 @@ pub async fn cmd_send(
         ),
     );
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
@@ -697,7 +842,10 @@ pub async fn cmd_send_with_payload(
     let client = connect_grpc(rpc).await?;
     let fee_policy = resolve_fee_policy(&client).await?;
 
-    let server = client.get_server_info().await.map_err(|err| format!("get_server_info failed: {err}"))?;
+    let server = client
+        .get_server_info()
+        .await
+        .map_err(|err| format!("get_server_info failed: {err}"))?;
     print_header("Send");
     print_kv("network", server.network_id);
     print_kv("synced", server.is_synced);
@@ -719,7 +867,10 @@ pub async fn cmd_send_with_payload(
 
     for item in sorted {
         total_in += item.utxo_entry.amount;
-        selected.push((TransactionOutpoint::from(item.outpoint), UtxoEntry::from(item.utxo_entry)));
+        selected.push((
+            TransactionOutpoint::from(item.outpoint),
+            UtxoEntry::from(item.utxo_entry),
+        ));
         let need = amount_sompi + fee_sompi_for_policy(selected.len(), 2, fee_policy);
         if total_in >= need {
             break;
@@ -729,7 +880,9 @@ pub async fn cmd_send_with_payload(
     let tx_fee = fee_sompi_for_policy(selected.len(), 2, fee_policy);
     let required = amount_sompi + tx_fee;
     if total_in < required {
-        return Err(format!("insufficient funds: total_in={total_in} required={required}"));
+        return Err(format!(
+            "insufficient funds: total_in={total_in} required={required}"
+        ));
     }
 
     let change = total_in - required;
@@ -745,8 +898,19 @@ pub async fn cmd_send_with_payload(
         outputs.push(TransactionOutput::new(change, change_spk));
     }
 
-    let unsigned = Transaction::new(TX_VERSION, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, payload.to_vec());
-    let entries = selected.into_iter().map(|(_, entry)| entry).collect::<Vec<_>>();
+    let unsigned = Transaction::new(
+        TX_VERSION,
+        inputs,
+        outputs,
+        0,
+        SUBNETWORK_ID_NATIVE,
+        0,
+        payload.to_vec(),
+    );
+    let entries = selected
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect::<Vec<_>>();
     let signed = sign(MutableTransaction::with_entries(unsigned, entries), keypair);
 
     let txid = client
@@ -754,7 +918,10 @@ pub async fn cmd_send_with_payload(
         .await
         .map_err(|err| format!("submit_transaction failed: {err}"))?;
 
-    let payload_hex = payload.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let payload_hex = payload
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     print_kv("submitted_txid", txid);
     print_kv("amount_sompi", amount_sompi);
     print_kv("fee_source", fee_policy.label());
@@ -772,7 +939,10 @@ pub async fn cmd_send_with_payload(
         ),
     );
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
@@ -787,7 +957,10 @@ pub async fn cmd_send_all_self_with_payload(
     let client = connect_grpc(rpc).await?;
     let fee_policy = resolve_fee_policy(&client).await?;
 
-    let server = client.get_server_info().await.map_err(|err| format!("get_server_info failed: {err}"))?;
+    let server = client
+        .get_server_info()
+        .await
+        .map_err(|err| format!("get_server_info failed: {err}"))?;
     print_header("Send");
     print_kv("network", server.network_id);
     print_kv("synced", server.is_synced);
@@ -806,12 +979,17 @@ pub async fn cmd_send_all_self_with_payload(
     let mut total_in = 0u64;
     for item in utxos {
         total_in += item.utxo_entry.amount;
-        selected.push((TransactionOutpoint::from(item.outpoint), UtxoEntry::from(item.utxo_entry)));
+        selected.push((
+            TransactionOutpoint::from(item.outpoint),
+            UtxoEntry::from(item.utxo_entry),
+        ));
     }
 
     let tx_fee = fee_sompi_for_policy(selected.len(), 1, fee_policy);
     if total_in <= tx_fee {
-        return Err(format!("insufficient funds: total_in={total_in} required_fee={tx_fee}"));
+        return Err(format!(
+            "insufficient funds: total_in={total_in} required_fee={tx_fee}"
+        ));
     }
     let amount_sompi = total_in - tx_fee;
 
@@ -822,8 +1000,19 @@ pub async fn cmd_send_all_self_with_payload(
         .collect();
     let outputs = vec![TransactionOutput::new(amount_sompi, spk)];
 
-    let unsigned = Transaction::new(TX_VERSION, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, payload.to_vec());
-    let entries = selected.into_iter().map(|(_, entry)| entry).collect::<Vec<_>>();
+    let unsigned = Transaction::new(
+        TX_VERSION,
+        inputs,
+        outputs,
+        0,
+        SUBNETWORK_ID_NATIVE,
+        0,
+        payload.to_vec(),
+    );
+    let entries = selected
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect::<Vec<_>>();
     let signed = sign(MutableTransaction::with_entries(unsigned, entries), keypair);
 
     let txid = client
@@ -831,7 +1020,10 @@ pub async fn cmd_send_all_self_with_payload(
         .await
         .map_err(|err| format!("submit_transaction failed: {err}"))?;
 
-    let payload_hex = payload.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let payload_hex = payload
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     print_kv("submitted_txid", txid);
     print_kv("amount_sompi", amount_sompi);
     print_kv("fee_source", fee_policy.label());
@@ -849,39 +1041,52 @@ pub async fn cmd_send_all_self_with_payload(
         ),
     );
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
 fn parse_outpoint_text(outpoint: &str) -> Result<TransactionOutpoint, String> {
     let mut parts = outpoint.split(':');
-    let txid_text = parts.next().ok_or_else(|| "outpoint must be in txid:vout format".to_string())?;
-    let vout_text = parts.next().ok_or_else(|| "outpoint must be in txid:vout format".to_string())?;
+    let txid_text = parts
+        .next()
+        .ok_or_else(|| "outpoint must be in txid:vout format".to_string())?;
+    let vout_text = parts
+        .next()
+        .ok_or_else(|| "outpoint must be in txid:vout format".to_string())?;
     if parts.next().is_some() {
         return Err("outpoint must be in txid:vout format".to_string());
     }
-    let txid = TransactionId::from_str(txid_text).map_err(|err| format!("invalid outpoint txid: {err}"))?;
-    let vout = vout_text.parse::<u32>().map_err(|err| format!("invalid outpoint vout: {err}"))?;
+    let txid = TransactionId::from_str(txid_text)
+        .map_err(|err| format!("invalid outpoint txid: {err}"))?;
+    let vout = vout_text
+        .parse::<u32>()
+        .map_err(|err| format!("invalid outpoint vout: {err}"))?;
     Ok(TransactionOutpoint::new(txid, vout))
 }
 
 fn load_compiled_contract(compiled_path: &str) -> Result<CompiledContract, String> {
-    let compiled_json =
-        fs::read_to_string(compiled_path).map_err(|err| format!("failed to read compiled json {compiled_path}: {err}"))?;
-    serde_json::from_str(&compiled_json).map_err(|err| format!("failed to parse compiled json {compiled_path}: {err}"))
+    let compiled_json = fs::read_to_string(compiled_path)
+        .map_err(|err| format!("failed to read compiled json {compiled_path}: {err}"))?;
+    serde_json::from_str(&compiled_json)
+        .map_err(|err| format!("failed to parse compiled json {compiled_path}: {err}"))
 }
 
 fn load_function_args(function_args_path: &str) -> Result<Vec<Expr>, String> {
     if function_args_path == "-" {
         return Ok(Vec::new());
     }
-    let args_json =
-        fs::read_to_string(function_args_path).map_err(|err| format!("failed to read function args {function_args_path}: {err}"))?;
-    serde_json::from_str::<Vec<Expr>>(&args_json).map_err(|err| format!("failed to parse function args {function_args_path}: {err}"))
+    let args_json = fs::read_to_string(function_args_path)
+        .map_err(|err| format!("failed to read function args {function_args_path}: {err}"))?;
+    serde_json::from_str::<Vec<Expr>>(&args_json)
+        .map_err(|err| format!("failed to parse function args {function_args_path}: {err}"))
 }
 
 fn load_spend_outputs(outputs_path: &str) -> Result<Vec<SpendOutputSpec>, String> {
-    let outputs_json = fs::read_to_string(outputs_path).map_err(|err| format!("failed to read outputs file {outputs_path}: {err}"))?;
+    let outputs_json = fs::read_to_string(outputs_path)
+        .map_err(|err| format!("failed to read outputs file {outputs_path}: {err}"))?;
     let output_rows = serde_json::from_str::<Vec<SpendOutputSpecInput>>(&outputs_json)
         .map_err(|err| format!("failed to parse outputs file {outputs_path}: {err}"))?;
     let amount_unit = AmountUnit::from_env()?;
@@ -907,9 +1112,8 @@ fn load_spend_outputs(outputs_path: &str) -> Result<Vec<SpendOutputSpec>, String
                 AmountUnit::Sompi => amount_text
                     .parse::<u64>()
                     .map_err(|err| format!("outputs[{index}] invalid amount sompi: {err}"))?,
-                AmountUnit::Kas => {
-                    parse_kas_to_sompi(amount_text).map_err(|err| format!("outputs[{index}] invalid amount kas: {err}"))?
-                }
+                AmountUnit::Kas => parse_kas_to_sompi(amount_text)
+                    .map_err(|err| format!("outputs[{index}] invalid amount kas: {err}"))?,
             },
             (Some(_), Some(_)) => {
                 return Err(format!(
@@ -933,7 +1137,9 @@ fn load_spend_outputs(outputs_path: &str) -> Result<Vec<SpendOutputSpec>, String
     Ok(outputs_spec)
 }
 
-fn build_spend_outputs(spec: Vec<SpendOutputSpec>) -> Result<(Vec<TransactionOutput>, u64), String> {
+fn build_spend_outputs(
+    spec: Vec<SpendOutputSpec>,
+) -> Result<(Vec<TransactionOutput>, u64), String> {
     let mut total_outputs = 0u64;
     let mut outputs = Vec::with_capacity(spec.len());
     for item in spec {
@@ -956,9 +1162,14 @@ fn build_spend_outputs(spec: Vec<SpendOutputSpec>) -> Result<(Vec<TransactionOut
 fn summarize_spend_outputs(spec: &[SpendOutputSpec]) -> String {
     spec.iter()
         .map(|item| match &item.destination {
-            SpendOutputDestination::Address(address) => format!("address={address}:{}", item.amount_sompi),
+            SpendOutputDestination::Address(address) => {
+                format!("address={address}:{}", item.amount_sompi)
+            }
             SpendOutputDestination::LockingBytecodeHex(locking_bytecode_hex) => {
-                format!("locking_bytecode_hex={locking_bytecode_hex}:{}", item.amount_sompi)
+                format!(
+                    "locking_bytecode_hex={locking_bytecode_hex}:{}",
+                    item.amount_sompi
+                )
             }
         })
         .collect::<Vec<_>>()
@@ -975,10 +1186,21 @@ fn build_spend_contract_tx(
     let signature_script = pay_to_script_hash_signature_script(compiled.script.clone(), sig_prefix)
         .map_err(|err| format!("failed to build p2sh signature script: {err}"))?;
     let input = TransactionInput::new(outpoint, signature_script, 0, 1);
-    let unsigned = Transaction::new(TX_VERSION, vec![input], outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+    let unsigned = Transaction::new(
+        TX_VERSION,
+        vec![input],
+        outputs,
+        0,
+        SUBNETWORK_ID_NATIVE,
+        0,
+        vec![],
+    );
     let locking_spk = pay_to_script_hash_script(&compiled.script);
     let entry = UtxoEntry::new(input_amount_sompi, locking_spk, 0, false, None);
-    Ok(MutableTransaction::with_entries(unsigned.into(), vec![entry]))
+    Ok(MutableTransaction::with_entries(
+        unsigned.into(),
+        vec![entry],
+    ))
 }
 
 fn resolve_signed_arg_placeholders(expr: Expr, pubkey: &[u8], signature: &[u8]) -> Expr {
@@ -1149,7 +1371,10 @@ pub async fn cmd_spend_contract_with_args_and_outputs(
 
     let outputs_spec = resolved_outputs
         .into_iter()
-        .map(|(destination, amount_sompi)| SpendOutputSpec { destination, amount_sompi })
+        .map(|(destination, amount_sompi)| SpendOutputSpec {
+            destination,
+            amount_sompi,
+        })
         .collect::<Vec<_>>();
     let outputs_summary = summarize_spend_outputs(&outputs_spec);
     let (outputs, total_outputs) = build_spend_outputs(outputs_spec)?;
@@ -1171,7 +1396,10 @@ pub async fn cmd_spend_contract_with_args_and_outputs(
     print_header("Spend Contract");
     print_kv("submitted_txid", txid);
     print_kv("contract_name", &compiled.contract_name);
-    print_kv("spent_outpoint", format!("{}:{}", outpoint.transaction_id, outpoint.index));
+    print_kv(
+        "spent_outpoint",
+        format!("{}:{}", outpoint.transaction_id, outpoint.index),
+    );
     print_kv("function", function_name);
     print_kv("outputs_total_sompi", total_outputs);
     print_kv("fee_source", fee_policy.label());
@@ -1205,7 +1433,10 @@ pub async fn cmd_spend_contract_with_args_and_outputs(
         ),
     );
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
@@ -1254,7 +1485,12 @@ pub async fn cmd_spend_contract_signed(
         outputs.clone(),
     )?;
     let reused_values = SigHashReusedValuesUnsync::new();
-    let sig_hash = calc_schnorr_signature_hash(&placeholder_tx.as_verifiable(), 0, SIG_HASH_ALL, &reused_values);
+    let sig_hash = calc_schnorr_signature_hash(
+        &placeholder_tx.as_verifiable(),
+        0,
+        SIG_HASH_ALL,
+        &reused_values,
+    );
     let msg = Message::from_digest_slice(&sig_hash.as_bytes())
         .map_err(|err| format!("failed to build signature message: {err}"))?;
     let schnorr_sig = keypair.sign_schnorr(msg);
@@ -1278,7 +1514,10 @@ pub async fn cmd_spend_contract_signed(
     print_header("Spend Contract Signed");
     print_kv("submitted_txid", txid);
     print_kv("contract_name", &compiled.contract_name);
-    print_kv("spent_outpoint", format!("{}:{}", outpoint.transaction_id, outpoint.index));
+    print_kv(
+        "spent_outpoint",
+        format!("{}:{}", outpoint.transaction_id, outpoint.index),
+    );
     print_kv("function", function_name);
     print_kv("outputs_total_sompi", total_outputs);
     print_kv("fee_source", fee_policy.label());
@@ -1309,11 +1548,19 @@ pub async fn cmd_spend_contract_signed(
         ),
     );
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
-pub async fn cmd_compound_utxos(rpc: &str, private_key: &str, address: &str, max_inputs: usize) -> Result<(), String> {
+pub async fn cmd_compound_utxos(
+    rpc: &str,
+    private_key: &str,
+    address: &str,
+    max_inputs: usize,
+) -> Result<(), String> {
     let address = parse_testnet_address(address)?;
     let keypair = parse_keypair(private_key)?;
     let client = connect_grpc(rpc).await?;
@@ -1322,7 +1569,10 @@ pub async fn cmd_compound_utxos(rpc: &str, private_key: &str, address: &str, max
         return Err("max_inputs must be at least 1".to_string());
     }
 
-    let server = client.get_server_info().await.map_err(|err| format!("get_server_info failed: {err}"))?;
+    let server = client
+        .get_server_info()
+        .await
+        .map_err(|err| format!("get_server_info failed: {err}"))?;
     print_header("Compound UTXOs");
     print_kv("network", server.network_id);
     print_kv("synced", server.is_synced);
@@ -1343,7 +1593,10 @@ pub async fn cmd_compound_utxos(rpc: &str, private_key: &str, address: &str, max
     for by_addr in mempool_entries {
         for sending in by_addr.sending {
             for input in sending.transaction.inputs {
-                mempool_spent_outpoints.insert((input.previous_outpoint.transaction_id, input.previous_outpoint.index));
+                mempool_spent_outpoints.insert((
+                    input.previous_outpoint.transaction_id,
+                    input.previous_outpoint.index,
+                ));
             }
         }
     }
@@ -1364,7 +1617,10 @@ pub async fn cmd_compound_utxos(rpc: &str, private_key: &str, address: &str, max
             break;
         }
         total_in += item.utxo_entry.amount;
-        selected.push((TransactionOutpoint::from(item.outpoint), UtxoEntry::from(item.utxo_entry)));
+        selected.push((
+            TransactionOutpoint::from(item.outpoint),
+            UtxoEntry::from(item.utxo_entry),
+        ));
     }
     if selected.is_empty() {
         return Err(format!(
@@ -1374,7 +1630,9 @@ pub async fn cmd_compound_utxos(rpc: &str, private_key: &str, address: &str, max
 
     let tx_fee = fee_sompi_for_policy(selected.len(), 1, fee_policy);
     if total_in <= tx_fee {
-        return Err(format!("insufficient funds: total_in={total_in} fee_sompi={tx_fee}"));
+        return Err(format!(
+            "insufficient funds: total_in={total_in} fee_sompi={tx_fee}"
+        ));
     }
 
     let output_amount = total_in - tx_fee;
@@ -1385,8 +1643,19 @@ pub async fn cmd_compound_utxos(rpc: &str, private_key: &str, address: &str, max
         .collect();
     let outputs = vec![TransactionOutput::new(output_amount, spk)];
 
-    let unsigned = Transaction::new(TX_VERSION, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
-    let entries = selected.into_iter().map(|(_, entry)| entry).collect::<Vec<_>>();
+    let unsigned = Transaction::new(
+        TX_VERSION,
+        inputs,
+        outputs,
+        0,
+        SUBNETWORK_ID_NATIVE,
+        0,
+        vec![],
+    );
+    let entries = selected
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect::<Vec<_>>();
     let signed = sign(MutableTransaction::with_entries(unsigned, entries), keypair);
 
     let txid = client
@@ -1417,7 +1686,10 @@ pub async fn cmd_compound_utxos(rpc: &str, private_key: &str, address: &str, max
         ),
     );
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
@@ -1433,10 +1705,10 @@ pub async fn cmd_deploy_covenant(
     let client = connect_grpc(rpc).await?;
     let fee_policy = resolve_fee_policy(&client).await?;
 
-    let compiled_json =
-        fs::read_to_string(compiled_path).map_err(|err| format!("failed to read compiled json {compiled_path}: {err}"))?;
-    let compiled: CompiledContract =
-        serde_json::from_str(&compiled_json).map_err(|err| format!("failed to parse compiled json {compiled_path}: {err}"))?;
+    let compiled_json = fs::read_to_string(compiled_path)
+        .map_err(|err| format!("failed to read compiled json {compiled_path}: {err}"))?;
+    let compiled: CompiledContract = serde_json::from_str(&compiled_json)
+        .map_err(|err| format!("failed to parse compiled json {compiled_path}: {err}"))?;
 
     let utxos = client
         .get_utxos_by_addresses(vec![address.clone()])
@@ -1453,7 +1725,10 @@ pub async fn cmd_deploy_covenant(
 
     for item in sorted {
         total_in += item.utxo_entry.amount;
-        selected.push((TransactionOutpoint::from(item.outpoint), UtxoEntry::from(item.utxo_entry)));
+        selected.push((
+            TransactionOutpoint::from(item.outpoint),
+            UtxoEntry::from(item.utxo_entry),
+        ));
         let need = amount_sompi + fee_sompi_for_policy(selected.len(), 2, fee_policy);
         if total_in >= need {
             break;
@@ -1463,7 +1738,9 @@ pub async fn cmd_deploy_covenant(
     let tx_fee = fee_sompi_for_policy(selected.len(), 2, fee_policy);
     let required = amount_sompi + tx_fee;
     if total_in < required {
-        return Err(format!("insufficient funds: total_in={total_in} required={required}"));
+        return Err(format!(
+            "insufficient funds: total_in={total_in} required={required}"
+        ));
     }
 
     let change = total_in - required;
@@ -1482,8 +1759,19 @@ pub async fn cmd_deploy_covenant(
         outputs.push(TransactionOutput::new(change, source_spk));
     }
 
-    let unsigned = Transaction::new(TX_VERSION, inputs, outputs, 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
-    let entries = selected.into_iter().map(|(_, entry)| entry).collect::<Vec<_>>();
+    let unsigned = Transaction::new(
+        TX_VERSION,
+        inputs,
+        outputs,
+        0,
+        SUBNETWORK_ID_NATIVE,
+        0,
+        vec![],
+    );
+    let entries = selected
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect::<Vec<_>>();
     let signed = sign(MutableTransaction::with_entries(unsigned, entries), keypair);
 
     let txid = client
@@ -1512,13 +1800,17 @@ pub async fn cmd_deploy_covenant(
         ),
     );
 
-    client.disconnect().await.map_err(|err| format!("disconnect failed: {err}"))?;
+    client
+        .disconnect()
+        .await
+        .map_err(|err| format!("disconnect failed: {err}"))?;
     Ok(())
 }
 
 fn parse_keypair(private_key_hex: &str) -> Result<Keypair, String> {
     let bytes = decode_hex_32(private_key_hex)?;
-    let secret = SecretKey::from_slice(&bytes).map_err(|err| format!("invalid private key: {err}"))?;
+    let secret =
+        SecretKey::from_slice(&bytes).map_err(|err| format!("invalid private key: {err}"))?;
     Ok(Keypair::from_secret_key(secp256k1::SECP256K1, &secret))
 }
 
@@ -1530,7 +1822,8 @@ fn decode_hex_32(input: &str) -> Result<[u8; 32], String> {
     let mut out = [0u8; 32];
     for i in 0..32 {
         let idx = i * 2;
-        out[i] = u8::from_str_radix(&value[idx..idx + 2], 16).map_err(|err| format!("invalid hex: {err}"))?;
+        out[i] = u8::from_str_radix(&value[idx..idx + 2], 16)
+            .map_err(|err| format!("invalid hex: {err}"))?;
     }
     Ok(out)
 }
@@ -1562,7 +1855,10 @@ fn estimated_mass(num_inputs: usize, num_outputs: usize) -> u64 {
 fn fee_sompi_for_policy(num_inputs: usize, num_outputs: usize, policy: FeePolicy) -> u64 {
     match policy {
         FeePolicy::RpcFastest(feerate) => {
-            let mass = estimated_mass(num_inputs, num_outputs) as f64;
+            // Keep a conservative buffer over the simple local mass estimate.
+            // Some nodes enforce a higher standard minimum fee than this estimate,
+            // and this avoids underpay rejections on submit.
+            let mass = (estimated_mass(num_inputs, num_outputs) as f64 * 1.75f64).ceil();
             let fee = (feerate * mass).ceil();
             if fee.is_finite() && fee > 0.0 {
                 fee as u64
@@ -1587,7 +1883,10 @@ async fn resolve_fee_policy(client: &GrpcClient) -> Result<FeePolicy, String> {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn default_sil_output_path(source: &str) -> String {

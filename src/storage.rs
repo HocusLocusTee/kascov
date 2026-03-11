@@ -49,13 +49,16 @@ pub fn load_wallets() -> Result<Vec<WalletRecord>, String> {
     if !Path::new(&path).exists() {
         return Ok(Vec::new());
     }
-    let json = fs::read_to_string(&path).map_err(|err| format!("failed to read wallets file {path}: {err}"))?;
-    serde_json::from_str::<Vec<WalletRecord>>(&json).map_err(|err| format!("failed to parse wallets file {path}: {err}"))
+    let json = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read wallets file {path}: {err}"))?;
+    serde_json::from_str::<Vec<WalletRecord>>(&json)
+        .map_err(|err| format!("failed to parse wallets file {path}: {err}"))
 }
 
 pub fn save_wallets(wallets: &[WalletRecord]) -> Result<(), String> {
     let path = wallets_path();
-    let json = serde_json::to_string_pretty(wallets).map_err(|err| format!("failed to encode wallets json: {err}"))?;
+    let json = serde_json::to_string_pretty(wallets)
+        .map_err(|err| format!("failed to encode wallets json: {err}"))?;
     fs::write(&path, json).map_err(|err| format!("failed to write wallets file {path}: {err}"))
 }
 
@@ -70,10 +73,16 @@ fn random_secret_key() -> Result<SecretKey, String> {
 }
 
 fn hex_encode_32(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
-pub fn generate_wallet_record(name: Option<String>, wallet_index: usize) -> Result<WalletRecord, String> {
+pub fn generate_wallet_record(
+    name: Option<String>,
+    wallet_index: usize,
+) -> Result<WalletRecord, String> {
     let secret = random_secret_key()?;
     let private_key = hex_encode_32(&secret.secret_bytes());
     let keypair = secp256k1::Keypair::from_secret_key(secp256k1::SECP256K1, &secret);
@@ -111,13 +120,15 @@ pub fn cmd_wallets() -> Result<(), String> {
 
 fn append_history(record: TxHistoryRecord) -> Result<(), String> {
     let path = history_path();
-    let line = serde_json::to_string(&record).map_err(|err| format!("failed to encode history json: {err}"))?;
+    let line = serde_json::to_string(&record)
+        .map_err(|err| format!("failed to encode history json: {err}"))?;
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .map_err(|err| format!("failed to open history file {path}: {err}"))?;
-    writeln!(file, "{line}").map_err(|err| format!("failed to write history file {path}: {err}"))?;
+    writeln!(file, "{line}")
+        .map_err(|err| format!("failed to write history file {path}: {err}"))?;
     Ok(())
 }
 
@@ -126,7 +137,8 @@ pub fn list_history() -> Result<Vec<TxHistoryRecord>, String> {
     if !Path::new(&path).exists() {
         return Ok(Vec::new());
     }
-    let file = fs::File::open(&path).map_err(|err| format!("failed to open history file {path}: {err}"))?;
+    let file = fs::File::open(&path)
+        .map_err(|err| format!("failed to open history file {path}: {err}"))?;
     let reader = io::BufReader::new(file);
     let mut rows = Vec::new();
     for line in reader.lines() {

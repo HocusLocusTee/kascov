@@ -48,6 +48,8 @@ Inside console, run `help` and use:
 - `config rpc <host:port|grpc://host:port>`
 - `wallet` / `wallet list`
 - `wallet use <index>` (wallet indexes start at `1`)
+- `wallet gen [name]` (generate and select a new wallet, no prompt)
+- `wallet delete <index> --yes` (non-interactive delete in arg mode)
 - `wallet pk` (shows currently selected private key)
 - `wallet delete <index>` (asks for `yes` confirmation; wallet indexes start at `1`)
 - `fees` (show current RPC fee estimate buckets)
@@ -80,6 +82,14 @@ Inside console, run `help` and use:
 - `history [limit]`
 - `back` (return to wallet selection)
 - `exit`
+
+Arg mode:
+- no startup command args: opens interactive console flow (wallet picker + prompt), unchanged
+- startup command args present: executes command(s) directly, then exits
+- run one command directly: `kascov help` or `kascov config show`
+- run multiple commands in one process: `kascov --exec "help" --exec "config show" --exec "history 10"`
+- combine both forms: `kascov --exec "config rpc 66.23.234.250:16210" send -s 1`
+- quoted args are supported in command input (e.g. `send -p "hello world"`)
 
 Per-command help:
 - `config -h`

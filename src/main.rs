@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{ArgAction, Parser, Subcommand};
 use std::fs;
 
 mod commands;
@@ -7,8 +7,10 @@ mod storage;
 mod ui;
 
 const DEFAULT_RPC: &str = "66.23.234.250:16210";
-const DEFAULT_PRIVATE_KEY: &str = "f2017e3d1f509e53f8c1dc2c941062508b06aed612a9a97e2a58b3aab7e9e829";
-const DEFAULT_ADDRESS: &str = "kaspatest:qp8snfastxwvcu40sy7sfwwad0kpkjt2flcdkuuk4gw2td0mcauukn2pq66m6";
+const DEFAULT_PRIVATE_KEY: &str =
+    "f2017e3d1f509e53f8c1dc2c941062508b06aed612a9a97e2a58b3aab7e9e829";
+const DEFAULT_ADDRESS: &str =
+    "kaspatest:qp8snfastxwvcu40sy7sfwwad0kpkjt2flcdkuuk4gw2td0mcauukn2pq66m6";
 const DEFAULT_CONTRACTS_DIR: &str = "contracts/silverscript";
 const DEFAULT_COMPILED_DIR: &str = "contracts/compiled";
 const DEFAULT_CONTRACT_PARAMS_DIR: &str = "contracts/params";
@@ -27,6 +29,16 @@ struct Cli {
     contracts_dir: String,
     #[arg(long, default_value = DEFAULT_COMPILED_DIR)]
     out_dir: String,
+    #[arg(short = 'x', long = "exec", action = ArgAction::Append)]
+    exec: Vec<String>,
+    #[command(subcommand)]
+    command: Option<RawCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+enum RawCommand {
+    #[command(external_subcommand)]
+    Raw(Vec<String>),
 }
 
 #[tokio::main]
@@ -41,14 +53,48 @@ async fn run() -> Result<(), String> {
     let _ = dotenvy::dotenv();
     let cli = Cli::parse();
     storage::parse_testnet_address(&cli.address)?;
-    ensure_startup_dirs(&cli.contracts_dir, &cli.out_dir, DEFAULT_CONTRACT_PARAMS_DIR)?;
-    console::cmd_console(cli.rpc, cli.private_key, cli.address, cli.contracts_dir, cli.out_dir).await
+    ensure_startup_dirs(
+        &cli.contracts_dir,
+        &cli.out_dir,
+        DEFAULT_CONTRACT_PARAMS_DIR,
+    )?;
+    let command = match cli.command {
+        Some(RawCommand::Raw(parts)) => parts,
+        None => Vec::new(),
+    };
+    if !cli.exec.is_empty() || !command.is_empty() {
+        return console::cmd_console_args(
+            cli.rpc,
+            cli.private_key,
+            cli.address,
+            cli.contracts_dir,
+            cli.out_dir,
+            cli.exec,
+            command,
+        )
+        .await;
+    }
+    console::cmd_console(
+        cli.rpc,
+        cli.private_key,
+        cli.address,
+        cli.contracts_dir,
+        cli.out_dir,
+    )
+    .await
 }
 
-fn ensure_startup_dirs(contracts_dir: &str, out_dir: &str, contract_params_dir: &str) -> Result<(), String> {
-    fs::create_dir_all(contracts_dir).map_err(|err| format!("failed to create contracts dir {contracts_dir}: {err}"))?;
-    fs::create_dir_all(out_dir).map_err(|err| format!("failed to create compiled dir {out_dir}: {err}"))?;
-    fs::create_dir_all(contract_params_dir)
-        .map_err(|err| format!("failed to create contract params dir {contract_params_dir}: {err}"))?;
+fn ensure_startup_dirs(
+    contracts_dir: &str,
+    out_dir: &str,
+    contract_params_dir: &str,
+) -> Result<(), String> {
+    fs::create_dir_all(contracts_dir)
+        .map_err(|err| format!("failed to create contracts dir {contracts_dir}: {err}"))?;
+    fs::create_dir_all(out_dir)
+        .map_err(|err| format!("failed to create compiled dir {out_dir}: {err}"))?;
+    fs::create_dir_all(contract_params_dir).map_err(|err| {
+        format!("failed to create contract params dir {contract_params_dir}: {err}")
+    })?;
     Ok(())
 }

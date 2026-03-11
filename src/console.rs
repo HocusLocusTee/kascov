@@ -1,20 +1,26 @@
 use rustyline::error::ReadlineError;
 use secp256k1::{Keypair, SecretKey};
-use silverscript_lang::{ast::{Expr, parse_contract_ast}, compiler::CompiledContract};
+use silverscript_lang::{
+    ast::{parse_contract_ast, Expr},
+    compiler::CompiledContract,
+};
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::commands::{
-    cmd_balance, cmd_compile_contracts, cmd_compile_sil, cmd_compile_sil_with_args, cmd_compound_utxos, cmd_deploy_covenant,
-    cmd_fee_estimate, cmd_pending_txs, cmd_send, cmd_send_all_self_with_payload, cmd_send_with_payload, cmd_spend_contract,
-    cmd_spend_contract_signed, cmd_spend_contract_with_args, cmd_spend_contract_with_args_and_outputs, cmd_submit_self, cmd_tx_status,
-    cmd_utxos, SpendOutputDestination,
+    cmd_balance, cmd_compile_contracts, cmd_compile_sil, cmd_compile_sil_with_args,
+    cmd_compound_utxos, cmd_deploy_covenant, cmd_fee_estimate, cmd_pending_txs, cmd_send,
+    cmd_send_all_self_with_payload, cmd_send_with_payload, cmd_spend_contract,
+    cmd_spend_contract_signed, cmd_spend_contract_with_args,
+    cmd_spend_contract_with_args_and_outputs, cmd_submit_self, cmd_tx_status, cmd_utxos,
+    SpendOutputDestination,
 };
 use crate::storage::{
-    cmd_history, cmd_wallets, generate_wallet_record, history_path, list_history, load_wallets, parse_testnet_address,
-    save_tx_history, save_wallets, TxHistoryRecord,
+    cmd_history, cmd_wallets, generate_wallet_record, history_path, list_history, load_wallets,
+    parse_testnet_address, save_tx_history, save_wallets, TxHistoryRecord,
 };
 use crate::ui::{print_header, print_kv};
 
@@ -123,6 +129,9 @@ fn print_wallet_help() {
     println!("usage: wallet use <index>");
     println!("  switch active wallet for the session");
     println!();
+    println!("usage: wallet gen [name]");
+    println!("  generate a new wallet and select it for the current session");
+    println!();
     println!("usage: wallet pk");
     println!("  show active wallet private key and derived public key (sensitive)");
     println!();
@@ -131,6 +140,8 @@ fn print_wallet_help() {
     println!();
     println!("usage: wallet delete <index>");
     println!("  delete a saved wallet after confirmation");
+    println!("usage: wallet delete <index> --yes");
+    println!("  delete a saved wallet without prompt (for non-interactive arg mode)");
     println!("example: wallet use 2");
 }
 
@@ -169,7 +180,9 @@ fn print_send_help() {
     println!("usage: send -p [to_address] <amount> <payload_text...>");
     println!("  send tx with UTF-8 payload (auto-hex encoded into tx payload field)");
     println!("  omit to_address to send to self");
-    println!("  shortcut: send -p <payload_text...> sends all available balance to self with payload");
+    println!(
+        "  shortcut: send -p <payload_text...> sends all available balance to self with payload"
+    );
     println!();
     println!("usage: send -p -h [to_address] <amount> <payload_hex...>");
     println!("  send tx with raw hex payload bytes (no UTF-8 conversion)");
@@ -204,7 +217,9 @@ fn print_spend_contract_help() {
     println!();
     println!("notes:");
     println!("  - replace placeholders like <txid:vout> and <input_amount> with real values");
-    println!("  - outpoint accepts alias `last` (most recent deploy contract outpoint from history)");
+    println!(
+        "  - outpoint accepts alias `last` (most recent deploy contract outpoint from history)"
+    );
     println!("  - input_amount must match the spent outpoint amount exactly");
     println!("  - outputs total must be <= input_amount (fee = input - outputs)");
     println!("  - outputs.json supports destination via `address` or `locking_bytecode_hex`");
@@ -220,9 +235,13 @@ fn print_spend_contract_help() {
 
 fn read_prompt_line(prompt: &str) -> Result<String, String> {
     print!("{prompt}");
-    io::stdout().flush().map_err(|err| format!("stdout flush failed: {err}"))?;
+    io::stdout()
+        .flush()
+        .map_err(|err| format!("stdout flush failed: {err}"))?;
     let mut line = String::new();
-    io::stdin().read_line(&mut line).map_err(|err| format!("stdin read failed: {err}"))?;
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|err| format!("stdin read failed: {err}"))?;
     let mut value = line.trim().to_string();
     // When bracketed paste mode markers leak into plain stdin prompts,
     // strip them so pasted values parse correctly.
@@ -233,7 +252,103 @@ fn read_prompt_line(prompt: &str) -> Result<String, String> {
 
 fn clear_terminal() -> Result<(), String> {
     print!("\x1B[2J\x1B[1;1H");
-    io::stdout().flush().map_err(|err| format!("stdout flush failed: {err}"))
+    io::stdout()
+        .flush()
+        .map_err(|err| format!("stdout flush failed: {err}"))
+}
+
+fn parse_command_parts(input: &str) -> Result<Vec<String>, String> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum QuoteMode {
+        None,
+        Single,
+        Double,
+    }
+
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut mode = QuoteMode::None;
+    let mut escaped = false;
+    let mut token_started = false;
+
+    for ch in input.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            token_started = true;
+            continue;
+        }
+
+        match mode {
+            QuoteMode::Single => {
+                if ch == '\'' {
+                    mode = QuoteMode::None;
+                } else {
+                    current.push(ch);
+                    token_started = true;
+                }
+            }
+            QuoteMode::Double => match ch {
+                '"' => mode = QuoteMode::None,
+                '\\' => escaped = true,
+                _ => {
+                    current.push(ch);
+                    token_started = true;
+                }
+            },
+            QuoteMode::None => match ch {
+                '\'' => {
+                    mode = QuoteMode::Single;
+                    token_started = true;
+                }
+                '"' => {
+                    mode = QuoteMode::Double;
+                    token_started = true;
+                }
+                '\\' => {
+                    escaped = true;
+                    token_started = true;
+                }
+                ch if ch.is_whitespace() => {
+                    if token_started {
+                        parts.push(current.clone());
+                        current.clear();
+                        token_started = false;
+                    }
+                }
+                _ => {
+                    current.push(ch);
+                    token_started = true;
+                }
+            },
+        }
+    }
+
+    if escaped {
+        return Err("unterminated escape sequence in command input".to_string());
+    }
+    if mode != QuoteMode::None {
+        return Err("unterminated quoted string in command input".to_string());
+    }
+    if token_started {
+        parts.push(current);
+    }
+
+    Ok(parts)
+}
+
+fn format_command_parts(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|part| {
+            if part.chars().any(|ch| ch.is_whitespace()) {
+                format!("\"{}\"", part.replace('\\', "\\\\").replace('"', "\\\""))
+            } else {
+                part.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn decode_hex_bytes(input: &str) -> Result<Vec<u8>, String> {
@@ -248,7 +363,8 @@ fn decode_hex_bytes(input: &str) -> Result<Vec<u8>, String> {
     }
     let mut out = Vec::with_capacity(hex.len() / 2);
     for i in (0..hex.len()).step_by(2) {
-        let byte = u8::from_str_radix(&hex[i..i + 2], 16).map_err(|err| format!("invalid hex at byte {}: {err}", i / 2))?;
+        let byte = u8::from_str_radix(&hex[i..i + 2], 16)
+            .map_err(|err| format!("invalid hex at byte {}: {err}", i / 2))?;
         out.push(byte);
     }
     Ok(out)
@@ -262,36 +378,50 @@ fn decode_hex_32(input: &str) -> Result<[u8; 32], String> {
     let mut out = [0u8; 32];
     for i in 0..32 {
         let idx = i * 2;
-        out[i] = u8::from_str_radix(&value[idx..idx + 2], 16).map_err(|err| format!("invalid hex: {err}"))?;
+        out[i] = u8::from_str_radix(&value[idx..idx + 2], 16)
+            .map_err(|err| format!("invalid hex: {err}"))?;
     }
     Ok(out)
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn public_key_from_private_key_hex(private_key_hex: &str) -> Result<String, String> {
     let bytes = decode_hex_32(private_key_hex)?;
-    let secret = SecretKey::from_slice(&bytes).map_err(|err| format!("invalid private key: {err}"))?;
+    let secret =
+        SecretKey::from_slice(&bytes).map_err(|err| format!("invalid private key: {err}"))?;
     let keypair = Keypair::from_secret_key(secp256k1::SECP256K1, &secret);
     Ok(encode_hex(&keypair.x_only_public_key().0.serialize()))
 }
 
-fn sign_digest_with_private_key_hex(private_key_hex: &str, digest_hex: &str) -> Result<(String, String, String), String> {
+fn sign_digest_with_private_key_hex(
+    private_key_hex: &str,
+    digest_hex: &str,
+) -> Result<(String, String, String), String> {
     let digest = decode_hex_bytes(digest_hex)?;
     if digest.len() != 32 {
         return Err("digest must be 32-byte hex".to_string());
     }
     let bytes = decode_hex_32(private_key_hex)?;
-    let secret = SecretKey::from_slice(&bytes).map_err(|err| format!("invalid private key: {err}"))?;
+    let secret =
+        SecretKey::from_slice(&bytes).map_err(|err| format!("invalid private key: {err}"))?;
     let keypair = Keypair::from_secret_key(secp256k1::SECP256K1, &secret);
-    let msg = secp256k1::Message::from_digest_slice(&digest).map_err(|err| format!("invalid digest: {err}"))?;
+    let msg = secp256k1::Message::from_digest_slice(&digest)
+        .map_err(|err| format!("invalid digest: {err}"))?;
     let schnorr_sig = keypair.sign_schnorr(msg);
     let sig64 = encode_hex(schnorr_sig.as_ref());
     let mut sig65 = schnorr_sig.as_ref().to_vec();
     sig65.push(0x01);
-    Ok((encode_hex(&keypair.x_only_public_key().0.serialize()), sig64, encode_hex(&sig65)))
+    Ok((
+        encode_hex(&keypair.x_only_public_key().0.serialize()),
+        sig64,
+        encode_hex(&sig65),
+    ))
 }
 
 fn decode_decimal_byte_list(input: &str) -> Result<Vec<u8>, String> {
@@ -332,7 +462,10 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<Expr, String> {
             }
             let mut items = Vec::new();
             for part in text.split(',') {
-                let n = part.trim().parse::<i64>().map_err(|err| format!("invalid int array item '{part}': {err}"))?;
+                let n = part
+                    .trim()
+                    .parse::<i64>()
+                    .map_err(|err| format!("invalid int array item '{part}': {err}"))?;
                 items.push(Expr::Int(n));
             }
             return Ok(Expr::Array(items));
@@ -383,7 +516,10 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<Expr, String> {
             Ok(Expr::from(bytes))
         }
         _ => {
-            if let Some(size) = type_name.strip_prefix("bytes").and_then(|n| n.parse::<usize>().ok()) {
+            if let Some(size) = type_name
+                .strip_prefix("bytes")
+                .and_then(|n| n.parse::<usize>().ok())
+            {
                 let bytes = parse_bytes_input(value)?;
                 if bytes.len() != size {
                     return Err(format!("{type_name} requires exactly {size} bytes"));
@@ -396,7 +532,10 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<Expr, String> {
     }
 }
 
-fn prompt_for_typed_args(params: &[(String, String)], context: &str) -> Result<Option<Vec<Expr>>, String> {
+fn prompt_for_typed_args(
+    params: &[(String, String)],
+    context: &str,
+) -> Result<Option<Vec<Expr>>, String> {
     let mut args = Vec::with_capacity(params.len());
     if params.is_empty() {
         return Ok(Some(args));
@@ -406,8 +545,12 @@ fn prompt_for_typed_args(params: &[(String, String)], context: &str) -> Result<O
     println!("type `q` to cancel");
     for (index, (name, type_name)) in params.iter().enumerate() {
         loop {
-            let input = read_prompt_line(&format!("arg[{}] {} ({})> ", index + 1, name, type_name))?;
-            if input.eq_ignore_ascii_case("q") || input.eq_ignore_ascii_case("quit") || input.eq_ignore_ascii_case("cancel") {
+            let input =
+                read_prompt_line(&format!("arg[{}] {} ({})> ", index + 1, name, type_name))?;
+            if input.eq_ignore_ascii_case("q")
+                || input.eq_ignore_ascii_case("quit")
+                || input.eq_ignore_ascii_case("cancel")
+            {
                 return Ok(None);
             }
             match parse_typed_expr(type_name, &input) {
@@ -490,8 +633,12 @@ fn parse_amount_cli_arg(arg_name: &str, raw: &str, unit: AmountUnit) -> Result<u
         ));
     }
     match unit {
-        AmountUnit::Sompi => raw.parse::<u64>().map_err(|err| format!("invalid {arg_name} sompi: {err}")),
-        AmountUnit::Kas => parse_kas_to_sompi(raw).map_err(|err| format!("invalid {arg_name} kas: {err}")),
+        AmountUnit::Sompi => raw
+            .parse::<u64>()
+            .map_err(|err| format!("invalid {arg_name} sompi: {err}")),
+        AmountUnit::Kas => {
+            parse_kas_to_sompi(raw).map_err(|err| format!("invalid {arg_name} kas: {err}"))
+        }
     }
 }
 
@@ -507,7 +654,9 @@ fn log_tx_failure(action: &str, rpc: &str, address: &str, details: String, err: 
 }
 
 fn is_cancel_input(value: &str) -> bool {
-    value.eq_ignore_ascii_case("q") || value.eq_ignore_ascii_case("quit") || value.eq_ignore_ascii_case("cancel")
+    value.eq_ignore_ascii_case("q")
+        || value.eq_ignore_ascii_case("quit")
+        || value.eq_ignore_ascii_case("cancel")
 }
 
 fn extract_outpoint_from_details(details: &str) -> Option<String> {
@@ -584,7 +733,9 @@ fn prompt_function_selection(compiled: &CompiledContract) -> Result<Option<Strin
     if is_cancel_input(&pick) {
         return Ok(None);
     }
-    let index = pick.parse::<usize>().map_err(|err| format!("invalid index: {err}"))?;
+    let index = pick
+        .parse::<usize>()
+        .map_err(|err| format!("invalid index: {err}"))?;
     if index == 0 || index > compiled.abi.len() {
         return Err("function index out of range".to_string());
     }
@@ -623,7 +774,8 @@ fn prompt_outputs_interactive(
         }
 
         loop {
-            let amount_text = read_prompt_line(&format!("output[{output_index}] amount_{}> ", unit.label()))?;
+            let amount_text =
+                read_prompt_line(&format!("output[{output_index}] amount_{}> ", unit.label()))?;
             if is_cancel_input(&amount_text) {
                 return Ok(None);
             }
@@ -650,17 +802,27 @@ fn prompt_outputs_interactive(
                 println!("error: amount must be greater than 0");
                 continue;
             }
-            outputs.push((SpendOutputDestination::Address(address.clone()), Some(amount)));
+            outputs.push((
+                SpendOutputDestination::Address(address.clone()),
+                Some(amount),
+            ));
             break;
         }
     }
     Ok(Some(outputs))
 }
 
-async fn cmd_spend_contract_wizard(rpc: &str, out_dir: &str, self_address: &str, amount_unit: AmountUnit) -> Result<(), String> {
+async fn cmd_spend_contract_wizard(
+    rpc: &str,
+    out_dir: &str,
+    self_address: &str,
+    amount_unit: AmountUnit,
+) -> Result<(), String> {
     let files = list_compiled_json_files(out_dir)?;
     if files.is_empty() {
-        return Err(format!("no compiled contract json files found in {out_dir}"));
+        return Err(format!(
+            "no compiled contract json files found in {out_dir}"
+        ));
     }
 
     print_header("Spend Contract Wizard");
@@ -673,14 +835,16 @@ async fn cmd_spend_contract_wizard(rpc: &str, out_dir: &str, self_address: &str,
         println!("spend cancelled");
         return Ok(());
     }
-    let index = pick.parse::<usize>().map_err(|err| format!("invalid index: {err}"))?;
+    let index = pick
+        .parse::<usize>()
+        .map_err(|err| format!("invalid index: {err}"))?;
     if index == 0 || index > files.len() {
         return Err("index out of range".to_string());
     }
     let compiled_path = files[index - 1].to_string_lossy().to_string();
 
-    let compiled_json =
-        fs::read_to_string(&compiled_path).map_err(|err| format!("failed to read compiled json {}: {err}", compiled_path))?;
+    let compiled_json = fs::read_to_string(&compiled_path)
+        .map_err(|err| format!("failed to read compiled json {}: {err}", compiled_path))?;
     let compiled = serde_json::from_str::<CompiledContract>(&compiled_json)
         .map_err(|err| format!("failed to parse compiled json {}: {err}", compiled_path))?;
 
@@ -771,7 +935,8 @@ fn list_sil_files(contracts_dir: &str) -> Result<Vec<PathBuf>, String> {
 }
 
 fn render_contract_source(path: &Path) -> Result<(), String> {
-    let text = fs::read_to_string(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let text = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     print_header("Contract Source");
     print_kv("file", path.display());
     print_kv("lines", text.lines().count());
@@ -800,7 +965,9 @@ fn cmd_contracts_browse(contracts_dir: &str) -> Result<(), String> {
         println!("contracts cancelled");
         return Ok(());
     }
-    let index = pick.parse::<usize>().map_err(|err| format!("invalid index: {err}"))?;
+    let index = pick
+        .parse::<usize>()
+        .map_err(|err| format!("invalid index: {err}"))?;
     if index == 0 || index > files.len() {
         return Err("index out of range".to_string());
     }
@@ -837,7 +1004,10 @@ fn default_compiled_output_for_source(source: &str, out_dir: &str) -> String {
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("compiled");
-    Path::new(out_dir).join(format!("{stem}.json")).to_string_lossy().to_string()
+    Path::new(out_dir)
+        .join(format!("{stem}.json"))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cmd_compile_interactive(contracts_dir: &str, out_dir: &str) -> Result<(), String> {
@@ -858,7 +1028,9 @@ fn cmd_compile_interactive(contracts_dir: &str, out_dir: &str) -> Result<(), Str
         println!("compile cancelled");
         return Ok(());
     }
-    let index = pick.parse::<usize>().map_err(|err| format!("invalid index: {err}"))?;
+    let index = pick
+        .parse::<usize>()
+        .map_err(|err| format!("invalid index: {err}"))?;
     if index == 0 || index > files.len() {
         return Err("index out of range".to_string());
     }
@@ -877,8 +1049,10 @@ fn cmd_compile_interactive(contracts_dir: &str, out_dir: &str) -> Result<(), Str
         out_input
     };
 
-    let source_text = fs::read_to_string(&source).map_err(|err| format!("failed to read source file {source}: {err}"))?;
-    let contract_ast = parse_contract_ast(&source_text).map_err(|err| format!("parse error: {err}"))?;
+    let source_text = fs::read_to_string(&source)
+        .map_err(|err| format!("failed to read source file {source}: {err}"))?;
+    let contract_ast =
+        parse_contract_ast(&source_text).map_err(|err| format!("parse error: {err}"))?;
     let params = contract_ast
         .params
         .iter()
@@ -904,7 +1078,9 @@ async fn cmd_deploy_browse(
 ) -> Result<(), String> {
     let files = list_compiled_json_files(out_dir)?;
     if files.is_empty() {
-        return Err(format!("no compiled contract json files found in {out_dir}"));
+        return Err(format!(
+            "no compiled contract json files found in {out_dir}"
+        ));
     }
 
     print_header("Deploy Browser");
@@ -919,7 +1095,9 @@ async fn cmd_deploy_browse(
         println!("deploy cancelled");
         return Ok(());
     }
-    let index = pick.parse::<usize>().map_err(|err| format!("invalid index: {err}"))?;
+    let index = pick
+        .parse::<usize>()
+        .map_err(|err| format!("invalid index: {err}"))?;
     if index == 0 || index > files.len() {
         return Err("index out of range".to_string());
     }
@@ -960,7 +1138,13 @@ async fn cmd_tx_status_browse(rpc: &str, limit: usize) -> Result<(), String> {
     print_kv("history_file", history_path());
     print_kv("available_rows", rows.len());
     for (index, row) in rows.iter().enumerate() {
-        println!("  [{}] {} {} {}", index + 1, row.ts_unix_ms, row.action, row.txid);
+        println!(
+            "  [{}] {} {} {}",
+            index + 1,
+            row.ts_unix_ms,
+            row.action,
+            row.txid
+        );
     }
 
     let pick = read_prompt_line("pick index (or q)> ")?;
@@ -969,7 +1153,9 @@ async fn cmd_tx_status_browse(rpc: &str, limit: usize) -> Result<(), String> {
         return Ok(());
     }
 
-    let index = pick.parse::<usize>().map_err(|err| format!("invalid index: {err}"))?;
+    let index = pick
+        .parse::<usize>()
+        .map_err(|err| format!("invalid index: {err}"))?;
     if index == 0 || index > rows.len() {
         return Err("index out of range".to_string());
     }
@@ -977,7 +1163,10 @@ async fn cmd_tx_status_browse(rpc: &str, limit: usize) -> Result<(), String> {
     cmd_tx_status(rpc, &selected.txid).await
 }
 
-fn select_wallet_on_console_boot(private_key: &mut String, address: &mut String) -> Result<Option<(String, String)>, String> {
+fn select_wallet_on_console_boot(
+    private_key: &mut String,
+    address: &mut String,
+) -> Result<Option<(String, String)>, String> {
     loop {
         let wallets = load_wallets()?;
         println!("wallet selection:");
@@ -994,7 +1183,11 @@ fn select_wallet_on_console_boot(private_key: &mut String, address: &mut String)
         }
         if choice.eq_ignore_ascii_case("g") {
             let name_input = read_prompt_line("wallet name (optional)> ")?;
-            let name = if name_input.is_empty() { None } else { Some(name_input) };
+            let name = if name_input.is_empty() {
+                None
+            } else {
+                Some(name_input)
+            };
             let mut wallets = wallets;
             let wallet = generate_wallet_record(name, wallets.len() + 1)?;
             wallets.push(wallet.clone());
@@ -1014,55 +1207,111 @@ fn select_wallet_on_console_boot(private_key: &mut String, address: &mut String)
             }
         }
         if choice.is_empty() {
-            println!("select a wallet index (1..{}) or 'g' to generate", wallets.len());
+            println!(
+                "select a wallet index (1..{}) or 'g' to generate",
+                wallets.len()
+            );
             continue;
         }
         println!("invalid wallet selection");
     }
 }
 
-pub async fn cmd_console(
+struct StartupCommand {
+    display: String,
+    parts: Vec<String>,
+}
+
+async fn cmd_console_with_inputs(
     mut rpc: String,
     mut private_key: String,
     mut address: String,
     mut contracts_dir: String,
     mut out_dir: String,
+    startup_inputs: Vec<StartupCommand>,
+    select_wallet_on_boot: bool,
+    exit_when_inputs_consumed: bool,
 ) -> Result<(), String> {
     let amount_unit = AmountUnit::from_env()?;
-    println!("kascov console started");
-    let Some((mut selected_wallet_name, mut selected_wallet_address)) =
-        select_wallet_on_console_boot(&mut private_key, &mut address)?
-    else {
-        println!("console exited");
-        return Ok(());
+    let (mut selected_wallet_name, mut selected_wallet_address) = if select_wallet_on_boot {
+        println!("kascov console started");
+        let Some((name, selected_address)) =
+            select_wallet_on_console_boot(&mut private_key, &mut address)?
+        else {
+            println!("console exited");
+            return Ok(());
+        };
+        clear_terminal()?;
+        (name, selected_address)
+    } else {
+        let mut selected_name = "cli-args".to_string();
+        if let Ok(wallets) = load_wallets() {
+            if let Some(wallet) = wallets
+                .iter()
+                .find(|wallet| wallet.address == address && wallet.private_key == private_key)
+            {
+                selected_name = wallet.name.clone();
+            }
+        }
+        (selected_name, address.clone())
     };
-    clear_terminal()?;
+
     println!("kascov console started");
-    println!("selected wallet name={} address={}", selected_wallet_name, selected_wallet_address);
-    println!("amount_unit={} (set KASPA_AMOUNT_UNIT=SOMPI|KAS)", amount_unit.label());
-    println!("type 'help' for commands");
-    let mut line_editor = rustyline::DefaultEditor::new().map_err(|err| format!("console init failed: {err}"))?;
-    let history_file =
-        std::env::var("KASPA_CONSOLE_HISTORY_FILE").unwrap_or_else(|_| DEFAULT_CONSOLE_HISTORY_PATH.to_string());
+    println!(
+        "selected wallet name={} address={}",
+        selected_wallet_name, selected_wallet_address
+    );
+    println!(
+        "amount_unit={} (set KASPA_AMOUNT_UNIT=SOMPI|KAS)",
+        amount_unit.label()
+    );
+    if !exit_when_inputs_consumed {
+        println!("type 'help' for commands");
+    }
+
+    let mut line_editor =
+        rustyline::DefaultEditor::new().map_err(|err| format!("console init failed: {err}"))?;
+    let history_file = std::env::var("KASPA_CONSOLE_HISTORY_FILE")
+        .unwrap_or_else(|_| DEFAULT_CONSOLE_HISTORY_PATH.to_string());
     let _ = line_editor.load_history(&history_file);
     let mut first_prompt = true;
+    let mut startup_queue = startup_inputs.into_iter().collect::<VecDeque<_>>();
 
     loop {
         if !first_prompt {
             println!();
         }
         first_prompt = false;
-        let input_line = match line_editor.readline("kascov> ") {
-            Ok(value) => value,
-            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
-            Err(err) => return Err(format!("console read failed: {err}")),
+        let (input_display, parts_owned) = match startup_queue.pop_front() {
+            Some(command) => {
+                println!("kascov> {}", command.display);
+                (command.display, command.parts)
+            }
+            None => {
+                if exit_when_inputs_consumed {
+                    break;
+                }
+                match line_editor.readline("kascov> ") {
+                    Ok(value) => {
+                        let parsed = match parse_command_parts(&value) {
+                            Ok(parts) => parts,
+                            Err(err) => {
+                                println!("error: {err}");
+                                continue;
+                            }
+                        };
+                        (value, parsed)
+                    }
+                    Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
+                    Err(err) => return Err(format!("console read failed: {err}")),
+                }
+            }
         };
-        let input = input_line.trim();
-        if input.is_empty() {
+        if parts_owned.is_empty() {
             continue;
         }
-        let _ = line_editor.add_history_entry(input);
-        let parts: Vec<&str> = input.split_whitespace().collect();
+        let _ = line_editor.add_history_entry(input_display.as_str());
+        let parts: Vec<&str> = parts_owned.iter().map(|part| part.as_str()).collect();
         match parts[0] {
             "exit" | "quit" => break,
             "clear" => {
@@ -1073,7 +1322,10 @@ pub async fn cmd_console(
                 if let Err(err) = clear_terminal() {
                     println!("error: {err}");
                 } else {
-                    println!("selected wallet name={} address={}", selected_wallet_name, selected_wallet_address);
+                    println!(
+                        "selected wallet name={} address={}",
+                        selected_wallet_name, selected_wallet_address
+                    );
                 }
             }
             "back" => {
@@ -1101,7 +1353,10 @@ pub async fn cmd_console(
                             continue;
                         }
                         println!("kascov console started");
-                        println!("selected wallet name={} address={}", selected_wallet_name, selected_wallet_address);
+                        println!(
+                            "selected wallet name={} address={}",
+                            selected_wallet_name, selected_wallet_address
+                        );
                         println!("type 'help' for commands");
                     }
                 }
@@ -1122,7 +1377,9 @@ pub async fn cmd_console(
                     println!("history_file={}", history_path());
                     continue;
                 }
-                if parts.len() == 2 && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help") {
+                if parts.len() == 2
+                    && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help")
+                {
                     print_config_help();
                     continue;
                 }
@@ -1140,7 +1397,9 @@ pub async fn cmd_console(
                     }
                     continue;
                 }
-                if parts.len() == 2 && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help") {
+                if parts.len() == 2
+                    && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help")
+                {
                     print_wallet_help();
                     continue;
                 }
@@ -1160,13 +1419,20 @@ pub async fn cmd_console(
                     print_header("Wallet Signature");
                     println!("warning: only sign trusted digests");
                     match sign_digest_with_private_key_hex(&private_key, parts[2]) {
-                        Ok((public_key, signature_schnorr64_hex, signature_schnorr65_sighashall_hex)) => {
+                        Ok((
+                            public_key,
+                            signature_schnorr64_hex,
+                            signature_schnorr65_sighashall_hex,
+                        )) => {
                             print_kv("name", &selected_wallet_name);
                             print_kv("address", &address);
                             print_kv("public_key", public_key);
                             print_kv("digest_hex", parts[2]);
                             print_kv("signature_schnorr64_hex", signature_schnorr64_hex);
-                            print_kv("signature_schnorr65_sighashall_hex", signature_schnorr65_sighashall_hex);
+                            print_kv(
+                                "signature_schnorr65_sighashall_hex",
+                                signature_schnorr65_sighashall_hex,
+                            );
                         }
                         Err(err) => println!("error: {err}"),
                     }
@@ -1204,10 +1470,64 @@ pub async fn cmd_console(
                     address = wallet.address.clone();
                     selected_wallet_name = wallet.name.clone();
                     selected_wallet_address = wallet.address.clone();
-                    println!("selected wallet name={} address={}", selected_wallet_name, selected_wallet_address);
+                    println!(
+                        "selected wallet name={} address={}",
+                        selected_wallet_name, selected_wallet_address
+                    );
                     continue;
                 }
-                if parts.len() == 3 && parts[1] == "delete" {
+                if parts.len() >= 2 && (parts[1] == "gen" || parts[1] == "generate") {
+                    let mut wallets = match load_wallets() {
+                        Ok(value) => value,
+                        Err(err) => {
+                            println!("error: {err}");
+                            continue;
+                        }
+                    };
+                    let name = if parts.len() > 2 {
+                        let raw = parts[2..].join(" ");
+                        let trimmed = raw.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        }
+                    } else {
+                        None
+                    };
+                    let wallet = match generate_wallet_record(name, wallets.len() + 1) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            println!("error: {err}");
+                            continue;
+                        }
+                    };
+                    wallets.push(wallet.clone());
+                    if let Err(err) = save_wallets(&wallets) {
+                        println!("error: {err}");
+                        continue;
+                    }
+                    private_key = wallet.private_key.clone();
+                    address = wallet.address.clone();
+                    selected_wallet_name = wallet.name.clone();
+                    selected_wallet_address = wallet.address.clone();
+                    println!(
+                        "generated and selected wallet name={} address={}",
+                        selected_wallet_name, selected_wallet_address
+                    );
+                    continue;
+                }
+                if (parts.len() == 3 || parts.len() == 4) && parts[1] == "delete" {
+                    let force_delete = if parts.len() == 4 {
+                        if parts[3] == "--yes" || parts[3] == "-y" {
+                            true
+                        } else {
+                            print_wallet_help();
+                            continue;
+                        }
+                    } else {
+                        false
+                    };
                     let mut wallets = match load_wallets() {
                         Ok(value) => value,
                         Err(err) => {
@@ -1231,24 +1551,38 @@ pub async fn cmd_console(
                         continue;
                     }
                     let target = &wallets[index - 1];
-                    println!("delete wallet [{}] {} {}", index, target.name, target.address);
-                    let confirm = match read_prompt_line("confirm delete (yes/no)> ") {
-                        Ok(value) => value,
-                        Err(err) => {
-                            println!("error: {err}");
+                    println!(
+                        "delete wallet [{}] {} {}",
+                        index, target.name, target.address
+                    );
+                    if !force_delete {
+                        if exit_when_inputs_consumed {
+                            println!(
+                                "error: non-interactive mode requires `wallet delete <index> --yes`"
+                            );
                             continue;
                         }
-                    };
-                    if confirm.to_lowercase() != "yes" {
-                        println!("cancelled");
-                        continue;
+                        let confirm = match read_prompt_line("confirm delete (yes/no)> ") {
+                            Ok(value) => value,
+                            Err(err) => {
+                                println!("error: {err}");
+                                continue;
+                            }
+                        };
+                        if confirm.to_lowercase() != "yes" {
+                            println!("cancelled");
+                            continue;
+                        }
                     }
                     let removed = wallets.remove(index - 1);
                     if let Err(err) = save_wallets(&wallets) {
                         println!("error: {err}");
                         continue;
                     }
-                    println!("deleted wallet name={} address={}", removed.name, removed.address);
+                    println!(
+                        "deleted wallet name={} address={}",
+                        removed.name, removed.address
+                    );
                     continue;
                 }
                 print_wallet_help();
@@ -1268,7 +1602,9 @@ pub async fn cmd_console(
                 }
             }
             "utxos" => {
-                if parts.len() == 2 && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help") {
+                if parts.len() == 2
+                    && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help")
+                {
                     print_utxos_help();
                     continue;
                 }
@@ -1291,7 +1627,9 @@ pub async fn cmd_console(
                 }
             }
             "tx-status" => {
-                if parts.len() == 2 && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help") {
+                if parts.len() == 2
+                    && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help")
+                {
                     print_tx_status_help();
                     continue;
                 }
@@ -1309,7 +1647,9 @@ pub async fn cmd_console(
                 };
             }
             "compile" => {
-                if parts.len() == 2 && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help") {
+                if parts.len() == 2
+                    && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help")
+                {
                     print_compile_help();
                     continue;
                 }
@@ -1325,7 +1665,11 @@ pub async fn cmd_console(
                         continue;
                     }
                     let source = parts[2];
-                    let out = if parts.len() == 4 { Some(parts[3]) } else { None };
+                    let out = if parts.len() == 4 {
+                        Some(parts[3])
+                    } else {
+                        None
+                    };
                     let source_text = match fs::read_to_string(source) {
                         Ok(value) => value,
                         Err(err) => {
@@ -1345,7 +1689,8 @@ pub async fn cmd_console(
                         .iter()
                         .map(|param| (param.name.clone(), param.type_ref.type_name()))
                         .collect::<Vec<_>>();
-                    let constructor_args = match prompt_for_typed_args(&params, "Constructor Args") {
+                    let constructor_args = match prompt_for_typed_args(&params, "Constructor Args")
+                    {
                         Ok(Some(value)) => value,
                         Ok(None) => {
                             println!("compile cancelled");
@@ -1397,7 +1742,11 @@ pub async fn cmd_console(
                 } else {
                     Some(parts[2])
                 };
-                let constructor_args = if parts.len() == 4 { Some(parts[3]) } else { None };
+                let constructor_args = if parts.len() == 4 {
+                    Some(parts[3])
+                } else {
+                    None
+                };
                 if let Err(err) = cmd_compile_sil(parts[1], out, constructor_args) {
                     println!("error: {err}");
                 }
@@ -1409,7 +1758,9 @@ pub async fn cmd_console(
                     }
                     continue;
                 }
-                if parts.len() == 2 && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help") {
+                if parts.len() == 2
+                    && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help")
+                {
                     print_contracts_help();
                     continue;
                 }
@@ -1423,12 +1774,16 @@ pub async fn cmd_console(
                 print_contracts_help();
             }
             "deploy" => {
-                if parts.len() == 2 && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help") {
+                if parts.len() == 2
+                    && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help")
+                {
                     print_deploy_help();
                     continue;
                 }
                 if parts.len() == 1 || (parts.len() == 2 && parts[1] == "-i") {
-                    if let Err(err) = cmd_deploy_browse(&rpc, &private_key, &address, &out_dir, amount_unit).await {
+                    if let Err(err) =
+                        cmd_deploy_browse(&rpc, &private_key, &address, &out_dir, amount_unit).await
+                    {
                         println!("error: {err}");
                     }
                     continue;
@@ -1445,7 +1800,10 @@ pub async fn cmd_console(
                     }
                 };
                 let compiled_path = resolve_compiled_path(parts[1], &out_dir);
-                if let Err(err) = cmd_deploy_covenant(&rpc, &private_key, &address, &compiled_path, amount_sompi).await {
+                if let Err(err) =
+                    cmd_deploy_covenant(&rpc, &private_key, &address, &compiled_path, amount_sompi)
+                        .await
+                {
                     log_tx_failure(
                         "deploy-covenant",
                         &rpc,
@@ -1457,25 +1815,36 @@ pub async fn cmd_console(
                 }
             }
             "spend-contract" => {
-                if parts.len() == 2 && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help") {
+                if parts.len() == 2
+                    && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help")
+                {
                     print_spend_contract_help();
                     continue;
                 }
                 if parts.len() == 2 && parts[1] == "-i" {
-                    if let Err(err) = cmd_spend_contract_wizard(&rpc, &out_dir, &address, amount_unit).await {
-                        log_tx_failure("spend-contract", &rpc, "contract-p2sh", "wizard=true".to_string(), &err);
+                    if let Err(err) =
+                        cmd_spend_contract_wizard(&rpc, &out_dir, &address, amount_unit).await
+                    {
+                        log_tx_failure(
+                            "spend-contract",
+                            &rpc,
+                            "contract-p2sh",
+                            "wizard=true".to_string(),
+                            &err,
+                        );
                         println!("error: {err}");
                     }
                     continue;
                 }
                 if parts.len() == 7 && parts[1] == "-i" {
-                    let input_amount_sompi = match parse_amount_cli_arg("input_amount", parts[4], amount_unit) {
-                        Ok(value) => value,
-                        Err(err) => {
-                            println!("error: {err}");
-                            continue;
-                        }
-                    };
+                    let input_amount_sompi =
+                        match parse_amount_cli_arg("input_amount", parts[4], amount_unit) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                println!("error: {err}");
+                                continue;
+                            }
+                        };
                     let outpoint = match resolve_outpoint_alias(parts[3]) {
                         Ok(value) => value,
                         Err(err) => {
@@ -1487,18 +1856,25 @@ pub async fn cmd_console(
                     let compiled_json = match fs::read_to_string(&compiled_path) {
                         Ok(value) => value,
                         Err(err) => {
-                            println!("error: failed to read compiled json {}: {err}", compiled_path);
+                            println!(
+                                "error: failed to read compiled json {}: {err}",
+                                compiled_path
+                            );
                             continue;
                         }
                     };
                     let compiled = match serde_json::from_str::<CompiledContract>(&compiled_json) {
                         Ok(value) => value,
                         Err(err) => {
-                            println!("error: failed to parse compiled json {}: {err}", compiled_path);
+                            println!(
+                                "error: failed to parse compiled json {}: {err}",
+                                compiled_path
+                            );
                             continue;
                         }
                     };
-                    let Some(function) = compiled.abi.iter().find(|entry| entry.name == parts[5]) else {
+                    let Some(function) = compiled.abi.iter().find(|entry| entry.name == parts[5])
+                    else {
                         println!("error: function '{}' not found in abi", parts[5]);
                         continue;
                     };
@@ -1548,13 +1924,14 @@ pub async fn cmd_console(
                     print_spend_contract_help();
                     continue;
                 }
-                let input_amount_sompi = match parse_amount_cli_arg("input_amount", parts[3], amount_unit) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        println!("error: {err}");
-                        continue;
-                    }
-                };
+                let input_amount_sompi =
+                    match parse_amount_cli_arg("input_amount", parts[3], amount_unit) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            println!("error: {err}");
+                            continue;
+                        }
+                    };
                 let outpoint = match resolve_outpoint_alias(parts[2]) {
                     Ok(value) => value,
                     Err(err) => {
@@ -1595,13 +1972,14 @@ pub async fn cmd_console(
                     println!("note: args.json can use placeholders $pubkey and $sig");
                     continue;
                 }
-                let input_amount_sompi = match parse_amount_cli_arg("input_amount", parts[3], amount_unit) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        println!("error: {err}");
-                        continue;
-                    }
-                };
+                let input_amount_sompi =
+                    match parse_amount_cli_arg("input_amount", parts[3], amount_unit) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            println!("error: {err}");
+                            continue;
+                        }
+                    };
                 let outpoint = match resolve_outpoint_alias(parts[2]) {
                     Ok(value) => value,
                     Err(err) => {
@@ -1636,7 +2014,10 @@ pub async fn cmd_console(
                 }
             }
             "send" => {
-                if parts.len() == 1 || (parts.len() == 2 && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help")) {
+                if parts.len() == 1
+                    || (parts.len() == 2
+                        && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help"))
+                {
                     print_send_help();
                     continue;
                 }
@@ -1656,28 +2037,30 @@ pub async fn cmd_console(
                         continue;
                     }
                     let mut to_address = address.as_str();
-                    let (amount_arg_index, payload_start, all_self_shortcut) =
-                        if parts[base_index].starts_with("kaspatest:") || parts[base_index].starts_with("kaspa:") {
-                            if parts.len() < base_index + 3 {
-                                println!(
-                                    "error: missing amount or payload {} for send -p{}",
-                                    if raw_payload_mode { "hex" } else { "text" },
-                                    if raw_payload_mode { " -h" } else { "" }
-                                );
-                                continue;
-                            }
-                            if let Err(err) = parse_testnet_address(parts[base_index]) {
-                                println!("error: invalid to_address: {err}");
-                                continue;
-                            }
-                            to_address = parts[base_index];
-                            (base_index + 1, base_index + 2, false)
-                        } else {
-                            match parse_amount_cli_arg("amount", parts[base_index], amount_unit) {
-                                Ok(_) => (base_index, base_index + 1, false),
-                                Err(_) => (0, base_index, true),
-                            }
-                        };
+                    let (amount_arg_index, payload_start, all_self_shortcut) = if parts[base_index]
+                        .starts_with("kaspatest:")
+                        || parts[base_index].starts_with("kaspa:")
+                    {
+                        if parts.len() < base_index + 3 {
+                            println!(
+                                "error: missing amount or payload {} for send -p{}",
+                                if raw_payload_mode { "hex" } else { "text" },
+                                if raw_payload_mode { " -h" } else { "" }
+                            );
+                            continue;
+                        }
+                        if let Err(err) = parse_testnet_address(parts[base_index]) {
+                            println!("error: invalid to_address: {err}");
+                            continue;
+                        }
+                        to_address = parts[base_index];
+                        (base_index + 1, base_index + 2, false)
+                    } else {
+                        match parse_amount_cli_arg("amount", parts[base_index], amount_unit) {
+                            Ok(_) => (base_index, base_index + 1, false),
+                            Err(_) => (0, base_index, true),
+                        }
+                    };
                     if parts.len() <= payload_start {
                         println!(
                             "error: {} payload is required",
@@ -1700,26 +2083,47 @@ pub async fn cmd_console(
                     };
                     let payload_hex = encode_hex(&payload_bytes);
                     if all_self_shortcut {
-                        if let Err(err) = cmd_send_all_self_with_payload(&rpc, &private_key, &address, &payload_bytes).await {
+                        if let Err(err) = cmd_send_all_self_with_payload(
+                            &rpc,
+                            &private_key,
+                            &address,
+                            &payload_bytes,
+                        )
+                        .await
+                        {
                             log_tx_failure(
                                 "send-payload",
                                 &rpc,
                                 &address,
-                                format!("to_address={} amount_mode=all_self payload_hex={}", address, payload_hex),
+                                format!(
+                                    "to_address={} amount_mode=all_self payload_hex={}",
+                                    address, payload_hex
+                                ),
                                 &err,
                             );
                             println!("error: {err}");
                         }
                     } else {
-                        let amount_sompi = match parse_amount_cli_arg("amount", parts[amount_arg_index], amount_unit) {
+                        let amount_sompi = match parse_amount_cli_arg(
+                            "amount",
+                            parts[amount_arg_index],
+                            amount_unit,
+                        ) {
                             Ok(value) => value,
                             Err(err) => {
                                 println!("error: {err}");
                                 continue;
                             }
                         };
-                        if let Err(err) =
-                            cmd_send_with_payload(&rpc, &private_key, &address, to_address, amount_sompi, &payload_bytes).await
+                        if let Err(err) = cmd_send_with_payload(
+                            &rpc,
+                            &private_key,
+                            &address,
+                            to_address,
+                            amount_sompi,
+                            &payload_bytes,
+                        )
+                        .await
                         {
                             log_tx_failure(
                                 "send-payload",
@@ -1748,7 +2152,9 @@ pub async fn cmd_console(
                             continue;
                         }
                     };
-                    if let Err(err) = cmd_submit_self(&rpc, &private_key, &address, amount_sompi).await {
+                    if let Err(err) =
+                        cmd_submit_self(&rpc, &private_key, &address, amount_sompi).await
+                    {
                         log_tx_failure(
                             "submit-self",
                             &rpc,
@@ -1776,7 +2182,9 @@ pub async fn cmd_console(
                     } else {
                         900
                     };
-                    if let Err(err) = cmd_compound_utxos(&rpc, &private_key, &address, max_inputs).await {
+                    if let Err(err) =
+                        cmd_compound_utxos(&rpc, &private_key, &address, max_inputs).await
+                    {
                         log_tx_failure(
                             "compound-utxos",
                             &rpc,
@@ -1800,7 +2208,9 @@ pub async fn cmd_console(
                         continue;
                     }
                 };
-                if let Err(err) = cmd_send(&rpc, &private_key, &address, to_address, amount_sompi).await {
+                if let Err(err) =
+                    cmd_send(&rpc, &private_key, &address, to_address, amount_sompi).await
+                {
                     log_tx_failure(
                         "send",
                         &rpc,
@@ -1845,4 +2255,68 @@ pub async fn cmd_console(
     let _ = line_editor.save_history(&history_file);
     println!("console exited");
     Ok(())
+}
+
+pub async fn cmd_console(
+    rpc: String,
+    private_key: String,
+    address: String,
+    contracts_dir: String,
+    out_dir: String,
+) -> Result<(), String> {
+    cmd_console_with_inputs(
+        rpc,
+        private_key,
+        address,
+        contracts_dir,
+        out_dir,
+        Vec::new(),
+        true,
+        false,
+    )
+    .await
+}
+
+pub async fn cmd_console_args(
+    rpc: String,
+    private_key: String,
+    address: String,
+    contracts_dir: String,
+    out_dir: String,
+    exec: Vec<String>,
+    command: Vec<String>,
+) -> Result<(), String> {
+    let mut startup_inputs = Vec::new();
+    for (index, raw) in exec.into_iter().enumerate() {
+        let parts = parse_command_parts(&raw)
+            .map_err(|err| format!("invalid --exec command #{}: {err}", index + 1))?;
+        if parts.is_empty() {
+            continue;
+        }
+        startup_inputs.push(StartupCommand {
+            display: raw.trim().to_string(),
+            parts,
+        });
+    }
+    if !command.is_empty() {
+        startup_inputs.push(StartupCommand {
+            display: format_command_parts(&command),
+            parts: command,
+        });
+    }
+    if startup_inputs.is_empty() {
+        return Err("no command args provided".to_string());
+    }
+
+    cmd_console_with_inputs(
+        rpc,
+        private_key,
+        address,
+        contracts_dir,
+        out_dir,
+        startup_inputs,
+        false,
+        true,
+    )
+    .await
 }
