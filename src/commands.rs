@@ -18,7 +18,7 @@ use kaspa_txscript::{
 use secp256k1::{Keypair, Message, SecretKey};
 use serde::Deserialize;
 use silverscript_lang::{
-    ast::Expr,
+    ast::{Expr, ExprKind},
     compiler::{compile_contract, CompileOptions, CompiledContract},
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -29,6 +29,47 @@ use walkdir::WalkDir;
 
 use crate::storage::{parse_testnet_address, save_tx_history};
 use crate::ui::{print_header, print_kv};
+
+type SilExpr = Expr<'static>;
+type SilCompiledContract = CompiledContract<'static>;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+enum LegacyArgExpr {
+    Int(i64),
+    Bool(bool),
+    Byte(u8),
+    String(String),
+    Identifier(String),
+    Bytes(Vec<u8>),
+    Array(Vec<LegacyArgExpr>),
+}
+
+impl From<LegacyArgExpr> for SilExpr {
+    fn from(value: LegacyArgExpr) -> Self {
+        match value {
+            LegacyArgExpr::Int(v) => Expr::int(v),
+            LegacyArgExpr::Bool(v) => Expr::bool(v),
+            LegacyArgExpr::Byte(v) => Expr::byte(v),
+            LegacyArgExpr::String(v) => Expr::string(v),
+            LegacyArgExpr::Identifier(v) => Expr::identifier(v),
+            LegacyArgExpr::Bytes(v) => Expr::from(v),
+            LegacyArgExpr::Array(items) => {
+                Expr::from(items.into_iter().map(SilExpr::from).collect::<Vec<_>>())
+            }
+        }
+    }
+}
+
+fn parse_expr_args_json(json: &str) -> Result<Vec<SilExpr>, serde_json::Error> {
+    match serde_json::from_str::<Vec<SilExpr>>(json) {
+        Ok(value) => Ok(value),
+        Err(primary_err) => match serde_json::from_str::<Vec<LegacyArgExpr>>(json) {
+            Ok(legacy) => Ok(legacy.into_iter().map(SilExpr::from).collect()),
+            Err(_) => Err(primary_err),
+        },
+    }
+}
 
 #[derive(Debug, Clone)]
 struct SpendOutputSpec {
@@ -160,7 +201,7 @@ pub fn cmd_compile_sil(
     let constructor_args = if let Some(path) = constructor_args_path {
         let json = fs::read_to_string(path)
             .map_err(|err| format!("failed to read constructor args {path}: {err}"))?;
-        serde_json::from_str::<Vec<Expr>>(&json)
+        parse_expr_args_json(&json)
             .map_err(|err| format!("failed to parse constructor args {path}: {err}"))?
     } else {
         Vec::new()
@@ -171,7 +212,7 @@ pub fn cmd_compile_sil(
 pub fn cmd_compile_sil_with_args(
     source: &str,
     out: Option<&str>,
-    constructor_args: Vec<Expr>,
+    constructor_args: Vec<SilExpr>,
 ) -> Result<(), String> {
     let source_text = fs::read_to_string(source)
         .map_err(|err| format!("failed to read source file {source}: {err}"))?;
@@ -198,7 +239,7 @@ pub fn cmd_compile_sil_with_args(
 fn constructor_args_for_batch_contract(
     contracts_path: &Path,
     source_path: &Path,
-) -> Result<(Vec<Expr>, Option<PathBuf>), String> {
+) -> Result<(Vec<SilExpr>, Option<PathBuf>), String> {
     let relative = source_path.strip_prefix(contracts_path).map_err(|err| {
         format!(
             "failed to map relative path for {}: {err}",
@@ -245,7 +286,7 @@ fn constructor_args_for_batch_contract(
     let constructor_args = if let Some(path) = constructor_args_path.as_ref() {
         let json = fs::read_to_string(path)
             .map_err(|err| format!("failed to read constructor args {}: {err}", path.display()))?;
-        serde_json::from_str::<Vec<Expr>>(&json)
+        parse_expr_args_json(&json)
             .map_err(|err| format!("failed to parse constructor args {}: {err}", path.display()))?
     } else {
         Vec::new()
@@ -1067,20 +1108,20 @@ fn parse_outpoint_text(outpoint: &str) -> Result<TransactionOutpoint, String> {
     Ok(TransactionOutpoint::new(txid, vout))
 }
 
-fn load_compiled_contract(compiled_path: &str) -> Result<CompiledContract, String> {
+fn load_compiled_contract(compiled_path: &str) -> Result<SilCompiledContract, String> {
     let compiled_json = fs::read_to_string(compiled_path)
         .map_err(|err| format!("failed to read compiled json {compiled_path}: {err}"))?;
     serde_json::from_str(&compiled_json)
         .map_err(|err| format!("failed to parse compiled json {compiled_path}: {err}"))
 }
 
-fn load_function_args(function_args_path: &str) -> Result<Vec<Expr>, String> {
+fn load_function_args(function_args_path: &str) -> Result<Vec<SilExpr>, String> {
     if function_args_path == "-" {
         return Ok(Vec::new());
     }
     let args_json = fs::read_to_string(function_args_path)
         .map_err(|err| format!("failed to read function args {function_args_path}: {err}"))?;
-    serde_json::from_str::<Vec<Expr>>(&args_json)
+    parse_expr_args_json(&args_json)
         .map_err(|err| format!("failed to parse function args {function_args_path}: {err}"))
 }
 
@@ -1203,20 +1244,24 @@ fn build_spend_contract_tx(
     ))
 }
 
-fn resolve_signed_arg_placeholders(expr: Expr, pubkey: &[u8], signature: &[u8]) -> Expr {
-    match expr {
-        Expr::Identifier(name) => match name.as_str() {
-            "$pubkey" => Expr::from(pubkey.to_vec()),
-            "$sig" => Expr::from(signature.to_vec()),
-            _ => Expr::Identifier(name),
+fn resolve_signed_arg_placeholders(expr: SilExpr, pubkey: &[u8], signature: &[u8]) -> SilExpr {
+    let Expr { kind, span } = expr;
+    match kind {
+        ExprKind::Identifier(name) => match name.as_str() {
+            "$pubkey" => Expr::new(ExprKind::Array(pubkey.iter().copied().map(Expr::byte).collect()), span),
+            "$sig" => Expr::new(ExprKind::Array(signature.iter().copied().map(Expr::byte).collect()), span),
+            _ => Expr::new(ExprKind::Identifier(name), span),
         },
-        Expr::Array(items) => Expr::Array(
-            items
-                .into_iter()
-                .map(|item| resolve_signed_arg_placeholders(item, pubkey, signature))
-                .collect(),
+        ExprKind::Array(items) => Expr::new(
+            ExprKind::Array(
+                items
+                    .into_iter()
+                    .map(|item| resolve_signed_arg_placeholders(item, pubkey, signature))
+                    .collect(),
+            ),
+            span,
         ),
-        other => other,
+        other => Expr::new(other, span),
     }
 }
 
@@ -1249,7 +1294,7 @@ pub async fn cmd_spend_contract_with_args(
     outpoint: &str,
     input_amount_sompi: u64,
     function_name: &str,
-    function_args: Vec<Expr>,
+    function_args: Vec<SilExpr>,
     outputs_path: &str,
     function_args_label: &str,
 ) -> Result<(), String> {
@@ -1277,7 +1322,7 @@ pub async fn cmd_spend_contract_with_args_and_outputs(
     outpoint: &str,
     input_amount_sompi: u64,
     function_name: &str,
-    function_args: Vec<Expr>,
+    function_args: Vec<SilExpr>,
     outputs_spec: Vec<(SpendOutputDestination, Option<u64>)>,
     function_args_label: &str,
     outputs_label: &str,

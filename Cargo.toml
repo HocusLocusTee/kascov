@@ -18,4 +18,4 @@ kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "co
 kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
 kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
 kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
-silverscript-lang = { git = "https://github.com/kaspanet/silverscript.git", rev = "0797000", package = "silverscript-lang" }
+silverscript-lang = { git = "https://github.com/kaspanet/silverscript.git", rev = "8e686e790bc3970b83b5bc915ab35f073679bca9", package = "silverscript-lang" }

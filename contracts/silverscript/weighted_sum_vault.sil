@@ -1,0 +1,19 @@
+pragma silverscript ^0.1.0;
+
+contract WeightedSumVault(
+    int coeffA,
+    int coeffB,
+    int target
+) {
+    // Unlock when caller provides x,y such that coeffA*x + coeffB*y == target.
+    entrypoint function unlock(int x, int y) {
+        int computed = coeffA * x + coeffB * y;
+        require(computed == target);
+    }
+
+    // Alternate entrypoint using mirrored coefficients.
+    entrypoint function unlockMirror(int x, int y) {
+        int computed = coeffA * y + coeffB * x;
+        require(computed == target);
+    }
+}

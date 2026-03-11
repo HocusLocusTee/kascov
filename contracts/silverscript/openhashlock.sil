@@ -1,13 +1,13 @@
 pragma silverscript ^0.1.0;
 
 contract OpenHashlock(
-    bytes32 digest,   // sha256(secret) or blake2b(secret)
+    byte[32] digest,   // sha256(secret) or blake2b(secret)
     bool useBlake2b
 ) {
 
     // Anyone can spend if they reveal the correct secret.
     // No restrictions on destination or output structure.
-    entrypoint function claim(bytes secret) {
+    entrypoint function claim(byte[] secret) {
 
         if (useBlake2b) {
             require(blake2b(secret) == digest);

@@ -26,6 +26,7 @@ use crate::ui::{print_header, print_kv};
 
 const DEFAULT_CONSOLE_HISTORY_PATH: &str = ".kascov-console-history";
 const SOMPI_PER_KAS: u64 = 100_000_000;
+type SilExpr = Expr<'static>;
 
 #[derive(Clone, Copy)]
 enum AmountUnit {
@@ -452,13 +453,13 @@ fn parse_bytes_input(value: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-fn parse_typed_expr(type_name: &str, raw: &str) -> Result<Expr, String> {
+fn parse_typed_expr(type_name: &str, raw: &str) -> Result<SilExpr, String> {
     let value = raw.trim();
     if let Some(inner_type) = type_name.strip_suffix("[]") {
         if inner_type == "int" {
             let text = value.trim_start_matches('[').trim_end_matches(']');
             if text.trim().is_empty() {
-                return Ok(Expr::Array(Vec::new()));
+                return Ok(Expr::from(Vec::<SilExpr>::new()));
             }
             let mut items = Vec::new();
             for part in text.split(',') {
@@ -466,9 +467,9 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<Expr, String> {
                     .trim()
                     .parse::<i64>()
                     .map_err(|err| format!("invalid int array item '{part}': {err}"))?;
-                items.push(Expr::Int(n));
+                items.push(Expr::int(n));
             }
-            return Ok(Expr::Array(items));
+            return Ok(Expr::from(items));
         }
         if inner_type == "byte" {
             return Ok(Expr::from(decode_hex_bytes(value)?));
@@ -479,14 +480,14 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<Expr, String> {
     match type_name {
         "int" => value
             .parse::<i64>()
-            .map(Expr::Int)
+            .map(Expr::int)
             .map_err(|err| format!("invalid int '{value}': {err}")),
         "bool" => match value.to_ascii_lowercase().as_str() {
-            "true" | "1" => Ok(Expr::Bool(true)),
-            "false" | "0" => Ok(Expr::Bool(false)),
+            "true" | "1" => Ok(Expr::bool(true)),
+            "false" | "0" => Ok(Expr::bool(false)),
             _ => Err("bool must be true/false or 1/0".to_string()),
         },
-        "string" => Ok(Expr::String(value.to_string())),
+        "string" => Ok(Expr::string(value.to_string())),
         "bytes" => {
             if let Some(text) = value.strip_prefix("utf8:") {
                 Ok(Expr::from(text.as_bytes().to_vec()))
@@ -499,7 +500,7 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<Expr, String> {
             if bytes.len() != 1 {
                 return Err("byte requires exactly 1 byte".to_string());
             }
-            Ok(Expr::Byte(bytes[0]))
+            Ok(Expr::byte(bytes[0]))
         }
         "pubkey" => {
             let bytes = parse_bytes_input(value)?;
@@ -535,7 +536,7 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<Expr, String> {
 fn prompt_for_typed_args(
     params: &[(String, String)],
     context: &str,
-) -> Result<Option<Vec<Expr>>, String> {
+) -> Result<Option<Vec<SilExpr>>, String> {
     let mut args = Vec::with_capacity(params.len());
     if params.is_empty() {
         return Ok(Some(args));
