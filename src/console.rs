@@ -1,7 +1,7 @@
 use rustyline::error::ReadlineError;
 use secp256k1::{Keypair, SecretKey};
 use silverscript_lang::{
-    ast::{parse_contract_ast, Expr},
+    ast::{parse_contract_ast, ArrayDim, Expr, TypeBase, TypeRef},
     compiler::CompiledContract,
 };
 use std::collections::VecDeque;
@@ -11,12 +11,12 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::commands::{
-    cmd_balance, cmd_compile_contracts, cmd_compile_sil, cmd_compile_sil_with_args,
+    cmd_balance, cmd_compile_argent, cmd_compile_contracts, cmd_compile_sil, cmd_compile_sil_with_args,
     cmd_compound_utxos, cmd_deploy_covenant, cmd_fee_estimate, cmd_pending_txs, cmd_send,
     cmd_send_all_self_with_payload, cmd_send_with_payload, cmd_spend_contract,
     cmd_spend_contract_signed, cmd_spend_contract_with_args,
     cmd_spend_contract_with_args_and_outputs, cmd_submit_self, cmd_tx_status, cmd_utxos,
-    SpendOutputDestination,
+    cmd_deploy_argent, default_argent_build_dir, SpendOutputDestination,
 };
 use crate::storage::{
     cmd_history, cmd_wallets, generate_wallet_record, history_path, list_history, load_wallets,
@@ -68,6 +68,7 @@ fn print_console_help() {
     println!("  tx-status [-h]");
     println!("  contracts [-h]");
     println!("  compile [-h]");
+    println!("  argent [-h]");
     println!("  deploy [-h]");
     println!("  spend-contract [-h]");
     println!("  send [-h]");
@@ -159,6 +160,18 @@ fn print_compile_help() {
     println!("usage: compile all [contracts_dir] [compiled_dir]");
     println!("  compile all `.sil` files in contracts dir to compiled dir");
     println!("example: compile -i contracts/silverscript/openhashlock.sil");
+    println!();
+    println!("usage: compile argent <source.ag> [build_dir]");
+    println!("  compile an Argent app, generate Silverscript, and compile generated contracts");
+}
+
+fn print_argent_help() {
+    println!("usage: argent compile <source.ag> [build_dir]");
+    println!("  generate artifact.json, manifest.json, Silverscript, and compiled JSON");
+    println!();
+    println!("usage: argent deploy <source.ag> <amount> [contract.json]");
+    println!("  compile an Argent app and deploy one generated contract as a Kaspa P2SH covenant");
+    println!("  omit contract.json only when the app produces exactly one contract");
 }
 
 fn print_deploy_help() {
@@ -459,7 +472,13 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<SilExpr, String> {
         if inner_type == "int" {
             let text = value.trim_start_matches('[').trim_end_matches(']');
             if text.trim().is_empty() {
-                return Ok(Expr::from(Vec::<SilExpr>::new()));
+                return Ok(Expr::array(
+                    TypeRef {
+                        base: TypeBase::Int,
+                        array_dims: vec![ArrayDim::Dynamic],
+                    },
+                    Vec::new(),
+                ));
             }
             let mut items = Vec::new();
             for part in text.split(',') {
@@ -469,10 +488,10 @@ fn parse_typed_expr(type_name: &str, raw: &str) -> Result<SilExpr, String> {
                     .map_err(|err| format!("invalid int array item '{part}': {err}"))?;
                 items.push(Expr::int(n));
             }
-            return Ok(Expr::from(items));
+            return Expr::try_from(items).map_err(|err| format!("invalid int array: {err}"));
         }
         if inner_type == "byte" {
-            return Ok(Expr::from(decode_hex_bytes(value)?));
+            return Ok(Expr::dynamic_bytes(decode_hex_bytes(value)?));
         }
         return Err(format!("unsupported interactive array type: {type_name}"));
     }
@@ -1654,6 +1673,28 @@ async fn cmd_console_with_inputs(
                     print_compile_help();
                     continue;
                 }
+                if parts.len() >= 3 && parts[1] == "argent" {
+                    if parts.len() > 4 {
+                        print_compile_help();
+                        continue;
+                    }
+                    let source = parts[2];
+                    let default_out;
+                    let build_dir = if parts.len() == 4 {
+                        parts[3]
+                    } else {
+                        default_out = default_argent_build_dir(source, &out_dir);
+                        default_out.as_str()
+                    };
+                    if let Err(err) = cmd_compile_argent(source, build_dir) {
+                        println!("error: {err}");
+                    }
+                    continue;
+                }
+                if parts.len() == 2 && parts[1] == "argent" {
+                    print_compile_help();
+                    continue;
+                }
                 if parts.len() == 2 && parts[1] == "-i" {
                     if let Err(err) = cmd_compile_interactive(&contracts_dir, &out_dir) {
                         println!("error: {err}");
@@ -1750,6 +1791,68 @@ async fn cmd_console_with_inputs(
                 };
                 if let Err(err) = cmd_compile_sil(parts[1], out, constructor_args) {
                     println!("error: {err}");
+                }
+            }
+            "argent" => {
+                if parts.len() == 2
+                    && (parts[1] == "-h" || parts[1] == "--help" || parts[1] == "help")
+                {
+                    print_argent_help();
+                    continue;
+                }
+                match parts.get(1).map(String::as_str) {
+                    Some("compile") if parts.len() == 3 || parts.len() == 4 => {
+                        let source = parts[2];
+                        let default_out;
+                        let build_dir = if parts.len() == 4 {
+                            parts[3]
+                        } else {
+                            default_out = default_argent_build_dir(source, &out_dir);
+                            default_out.as_str()
+                        };
+                        if let Err(err) = cmd_compile_argent(source, build_dir) {
+                            println!("error: {err}");
+                        }
+                    }
+                    Some("deploy") if parts.len() == 4 || parts.len() == 5 => {
+                        let source = parts[2];
+                        let amount_sompi = match parse_amount_cli_arg("amount", parts[3], amount_unit) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                println!("error: {err}");
+                                continue;
+                            }
+                        };
+                        let build_dir = default_argent_build_dir(source, &out_dir);
+                        let contract = parts.get(4).map(String::as_str);
+                        if let Err(err) = cmd_deploy_argent(
+                            &rpc,
+                            &private_key,
+                            &address,
+                            source,
+                            &build_dir,
+                            amount_sompi,
+                            contract,
+                        )
+                        .await
+                        {
+                            log_tx_failure(
+                                "deploy-argent",
+                                &rpc,
+                                &address,
+                                format!(
+                                    "source={} build_dir={} contract={} amount_sompi={}",
+                                    source,
+                                    build_dir,
+                                    contract.unwrap_or("<single-generated-contract>"),
+                                    amount_sompi
+                                ),
+                                &err,
+                            );
+                            println!("error: {err}");
+                        }
+                    }
+                    _ => print_argent_help(),
                 }
             }
             "contracts" => {
