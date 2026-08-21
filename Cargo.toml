@@ -2,6 +2,7 @@
 name = "kascov"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94.0"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -11,11 +12,12 @@ serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 dotenvy = "0.15"
 walkdir = "2.5"
-getrandom = "0.2"
+getrandom = "0.3"
 rustyline = "14"
-kaspa-grpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
-kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
-kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
-kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
-kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "covpp-reset1" }
-silverscript-lang = { git = "https://github.com/kaspanet/silverscript.git", rev = "8e686e790bc3970b83b5bc915ab35f073679bca9", package = "silverscript-lang" }
+kaspa-grpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "059d61ec093d2696232d12e4375ec33e21f896f6" }
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "059d61ec093d2696232d12e4375ec33e21f896f6" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "059d61ec093d2696232d12e4375ec33e21f896f6" }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "059d61ec093d2696232d12e4375ec33e21f896f6" }
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "059d61ec093d2696232d12e4375ec33e21f896f6" }
+silverscript-lang = { git = "https://github.com/kaspanet/silverscript.git", rev = "140bf184fd03dc0f5c29155f89e9e5d733a1152f", package = "silverscript-lang" }
+argent = { git = "https://github.com/argent-lang/argent.git", rev = "01f4aed1fbe52034b9c55cdfca5a192fba35466b", package = "argent" }

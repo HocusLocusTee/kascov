@@ -15,7 +15,10 @@ From `kascov/`:
 cargo run
 ```
 
-Dependencies are pulled via Cargo from git (including `silverscript-lang`), so cloning `kascov/` alone is enough.
+This branch requires Rust 1.94.0; the included `rust-toolchain.toml` makes
+`rustup` select it automatically.
+
+Dependencies are pulled via Cargo from git (including `silverscript-lang` and `argent`), so cloning `kascov/` alone is enough.
 
 
 ## `.env` configuration
@@ -64,9 +67,12 @@ Inside console, run `help` and use:
 - `compile -i` (fully guided compile flow: pick contract, optional output path, typed constructor args)
 - `compile -i <source.sil> [out.json]` (interactive constructor args prompt; no args JSON file needed)
 - `compile all [contracts_dir] [compiled_dir]` (defaults: `contracts/silverscript` -> `contracts/compiled`; auto-loads constructor args from `contracts/params/<name>_ctor.json` or `contracts/params/<name>.json` when present)
+- `compile argent <source.ag> [build_dir]` (builds an Argent app, emits `artifact.json` and generated `.sil`, then compiles the generated contracts)
+- `argent compile <source.ag> [build_dir]` (same Argent build flow using the explicit Argent command namespace)
 - `deploy` (interactive picker from compiled dir + amount prompt)
 - `deploy -i` (same as `deploy`; explicit interactive mode)
 - `deploy <compiled.json> <amount>`
+- `argent deploy <source.ag> <amount> [contract.json]` (builds an Argent app and deploys one generated contract; the contract selector is required when the app emits multiple contracts)
 - `spend-contract <compiled.json> <txid:vout> <input_amount> <function> <args.json|-> <outputs.json>`
 - `spend-contract -i` (fully guided spend flow: contract selection, outpoint, amount, function, args, outputs; supports `self` address alias and one `all` amount)
 - `spend-contract -i <compiled.json> <txid:vout> <input_amount> <function> <outputs.json>` (interactive ABI-typed function args prompt)
@@ -176,6 +182,13 @@ Default workspace under `kascov/contracts/`:
 - `contracts/silverscript/` contract sources (`.sil`)
 - `contracts/compiled/` compiled artifacts (`.json`)
 - `contracts/params/` constructor/function/output parameter files
+
+Argent builds default to `contracts/argent/<app-name>/` and contain:
+- `artifact.json` and `manifest.json` from the Argent compiler
+- `sil/` generated Silverscript sources
+- `compiled/` compiled contract JSON files consumable by `deploy` and `spend-contract`
+
+Argent applications can emit multiple coordinated contracts. The current deploy command deploys a selected generated contract through the existing P2SH flow; coordinated multi-actor transaction construction remains a separate runtime integration.
 
 ## Persistence
 

@@ -65,7 +65,7 @@ pub fn save_wallets(wallets: &[WalletRecord]) -> Result<(), String> {
 fn random_secret_key() -> Result<SecretKey, String> {
     loop {
         let mut bytes = [0u8; 32];
-        getrandom::getrandom(&mut bytes).map_err(|err| format!("os random failed: {err}"))?;
+    getrandom::fill(&mut bytes).map_err(|err| format!("os random failed: {err}"))?;
         if let Ok(secret) = SecretKey::from_slice(&bytes) {
             return Ok(secret);
         }

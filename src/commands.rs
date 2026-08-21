@@ -45,28 +45,37 @@ enum LegacyArgExpr {
     Array(Vec<LegacyArgExpr>),
 }
 
-impl From<LegacyArgExpr> for SilExpr {
-    fn from(value: LegacyArgExpr) -> Self {
+impl TryFrom<LegacyArgExpr> for SilExpr {
+    type Error = String;
+
+    fn try_from(value: LegacyArgExpr) -> Result<Self, Self::Error> {
         match value {
-            LegacyArgExpr::Int(v) => Expr::int(v),
-            LegacyArgExpr::Bool(v) => Expr::bool(v),
-            LegacyArgExpr::Byte(v) => Expr::byte(v),
-            LegacyArgExpr::String(v) => Expr::string(v),
-            LegacyArgExpr::Identifier(v) => Expr::identifier(v),
-            LegacyArgExpr::Bytes(v) => Expr::from(v),
-            LegacyArgExpr::Array(items) => {
-                Expr::from(items.into_iter().map(SilExpr::from).collect::<Vec<_>>())
-            }
+            LegacyArgExpr::Int(v) => Ok(Expr::int(v)),
+            LegacyArgExpr::Bool(v) => Ok(Expr::bool(v)),
+            LegacyArgExpr::Byte(v) => Ok(Expr::byte(v)),
+            LegacyArgExpr::String(v) => Ok(Expr::string(v)),
+            LegacyArgExpr::Identifier(v) => Ok(Expr::identifier(v)),
+            LegacyArgExpr::Bytes(v) => Ok(Expr::from(v)),
+            LegacyArgExpr::Array(items) => Expr::try_from(
+                items
+                    .into_iter()
+                    .map(SilExpr::try_from)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+            .map_err(|err| err.to_string()),
         }
     }
 }
 
-fn parse_expr_args_json(json: &str) -> Result<Vec<SilExpr>, serde_json::Error> {
+fn parse_expr_args_json(json: &str) -> Result<Vec<SilExpr>, String> {
     match serde_json::from_str::<Vec<SilExpr>>(json) {
         Ok(value) => Ok(value),
         Err(primary_err) => match serde_json::from_str::<Vec<LegacyArgExpr>>(json) {
-            Ok(legacy) => Ok(legacy.into_iter().map(SilExpr::from).collect()),
-            Err(_) => Err(primary_err),
+            Ok(legacy) => legacy
+                .into_iter()
+                .map(SilExpr::try_from)
+                .collect::<Result<Vec<_>, _>>(),
+            Err(_) => Err(primary_err.to_string()),
         },
     }
 }
@@ -217,10 +226,7 @@ pub fn cmd_compile_sil_with_args(
     let source_text = fs::read_to_string(source)
         .map_err(|err| format!("failed to read source file {source}: {err}"))?;
 
-    let compile_options = CompileOptions {
-        allow_yield: true,
-        ..CompileOptions::default()
-    };
+    let compile_options = CompileOptions::default();
     let compiled = compile_contract(&source_text, &constructor_args, compile_options)
         .map_err(|err| format!("compile error: {err}"))?;
 
@@ -334,10 +340,7 @@ pub fn cmd_compile_contracts(contracts_dir: &str, out_dir: &str) -> Result<(), S
         })?;
         let (constructor_args, constructor_args_path) =
             constructor_args_for_batch_contract(contracts_path, source_path)?;
-        let compile_options = CompileOptions {
-            allow_yield: true,
-            ..CompileOptions::default()
-        };
+        let compile_options = CompileOptions::default();
         let compiled = compile_contract(&source_text, &constructor_args, compile_options)
             .map_err(|err| format!("compile error in {}: {err}", source_path.display()))?;
         let json = serde_json::to_string_pretty(&compiled)
@@ -356,6 +359,125 @@ pub fn cmd_compile_contracts(contracts_dir: &str, out_dir: &str) -> Result<(), S
     println!("compiled_dir={out_dir}");
     println!("compiled_count={compiled_count}");
     Ok(())
+}
+
+pub fn default_argent_build_dir(source: &str, compiled_out_dir: &str) -> String {
+    let stem = Path::new(source)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("argent-app");
+    let base = Path::new(compiled_out_dir)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    base.join("argent").join(stem).to_string_lossy().to_string()
+}
+
+pub fn cmd_compile_argent(source: &str, out_dir: &str) -> Result<(), String> {
+    let source_path = Path::new(source);
+    if source_path.extension().and_then(|value| value.to_str()) != Some("ag") {
+        return Err(format!("Argent source must use the .ag extension: {source}"));
+    }
+    if !source_path.exists() {
+        return Err(format!("Argent source does not exist: {source}"));
+    }
+
+    let build_path = Path::new(out_dir);
+    fs::create_dir_all(build_path)
+        .map_err(|err| format!("failed to create Argent build dir {out_dir}: {err}"))?;
+    argent::build_file(source_path, build_path)
+        .map_err(|err| format!("Argent compile failed: {err}"))?;
+
+    let sil_dir = build_path.join("sil");
+    let compiled_dir = build_path.join("compiled");
+    let sil_dir = sil_dir
+        .to_str()
+        .ok_or_else(|| format!("invalid generated Silverscript path: {}", sil_dir.display()))?;
+    let compiled_dir = compiled_dir.to_str().ok_or_else(|| {
+        format!(
+            "invalid generated compiled-contract path: {}",
+            build_path.join("compiled").display()
+        )
+    })?;
+    cmd_compile_contracts(sil_dir, compiled_dir)?;
+    println!("argent_source={source}");
+    println!("argent_build_dir={out_dir}");
+    println!("argent_artifact={}/artifact.json", out_dir.trim_end_matches('/'));
+    println!("argent_compiled_dir={compiled_dir}");
+    Ok(())
+}
+
+fn list_argent_compiled_contracts(build_dir: &str) -> Result<Vec<PathBuf>, String> {
+    let compiled_dir = Path::new(build_dir).join("compiled");
+    if !compiled_dir.exists() {
+        return Err(format!(
+            "Argent compiled dir does not exist: {}",
+            compiled_dir.display()
+        ));
+    }
+    let mut files = Vec::new();
+    for entry in WalkDir::new(&compiled_dir) {
+        let entry = entry.map_err(|err| format!("walk error: {err}"))?;
+        if entry.file_type().is_file()
+            && entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+        {
+            files.push(entry.path().to_path_buf());
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn resolve_argent_compiled_contract(
+    build_dir: &str,
+    contract: Option<&str>,
+) -> Result<String, String> {
+    let compiled_dir = Path::new(build_dir).join("compiled");
+    if let Some(contract) = contract {
+        let requested = Path::new(contract);
+        let mut candidate = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            compiled_dir.join(requested)
+        };
+        if !candidate.exists() && candidate.extension().is_none() {
+            candidate.set_extension("json");
+        }
+        if !candidate.is_file() {
+            return Err(format!("Argent compiled contract does not exist: {}", candidate.display()));
+        }
+        return Ok(candidate.to_string_lossy().to_string());
+    }
+
+    let files = list_argent_compiled_contracts(build_dir)?;
+    match files.as_slice() {
+        [only] => Ok(only.to_string_lossy().to_string()),
+        [] => Err(format!("no generated Argent contracts found in {}", compiled_dir.display())),
+        _ => {
+            let names = files
+                .iter()
+                .map(|path| path.strip_prefix(&compiled_dir).unwrap_or(path).display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "Argent app generated multiple contracts; choose one with [contract.json]: {names}"
+            ))
+        }
+    }
+}
+
+pub async fn cmd_deploy_argent(
+    rpc: &str,
+    private_key: &str,
+    address: &str,
+    source: &str,
+    build_dir: &str,
+    amount_sompi: u64,
+    contract: Option<&str>,
+) -> Result<(), String> {
+    cmd_compile_argent(source, build_dir)?;
+    let compiled_path = resolve_argent_compiled_contract(build_dir, contract)?;
+    cmd_deploy_covenant(rpc, private_key, address, &compiled_path, amount_sompi).await
 }
 
 async fn connect_grpc(rpc: &str) -> Result<GrpcClient, String> {
@@ -1224,7 +1346,7 @@ fn build_spend_contract_tx(
     sig_prefix: Vec<u8>,
     outputs: Vec<TransactionOutput>,
 ) -> Result<MutableTransaction, String> {
-    let signature_script = pay_to_script_hash_signature_script(compiled.script.clone(), sig_prefix)
+    let signature_script = pay_to_script_hash_signature_script(compiled.bytecode.clone(), sig_prefix)
         .map_err(|err| format!("failed to build p2sh signature script: {err}"))?;
     let input = TransactionInput::new(outpoint, signature_script, 0, 1);
     let unsigned = Transaction::new(
@@ -1236,7 +1358,7 @@ fn build_spend_contract_tx(
         0,
         vec![],
     );
-    let locking_spk = pay_to_script_hash_script(&compiled.script);
+    let locking_spk = pay_to_script_hash_script(&compiled.bytecode);
     let entry = UtxoEntry::new(input_amount_sompi, locking_spk, 0, false, None);
     Ok(MutableTransaction::with_entries(
         unsigned.into(),
@@ -1248,17 +1370,18 @@ fn resolve_signed_arg_placeholders(expr: SilExpr, pubkey: &[u8], signature: &[u8
     let Expr { kind, span } = expr;
     match kind {
         ExprKind::Identifier(name) => match name.as_str() {
-            "$pubkey" => Expr::new(ExprKind::Array(pubkey.iter().copied().map(Expr::byte).collect()), span),
-            "$sig" => Expr::new(ExprKind::Array(signature.iter().copied().map(Expr::byte).collect()), span),
+            "$pubkey" => Expr::bytes(pubkey.to_vec()),
+            "$sig" => Expr::bytes(signature.to_vec()),
             _ => Expr::new(ExprKind::Identifier(name), span),
         },
-        ExprKind::Array(items) => Expr::new(
-            ExprKind::Array(
-                items
+        ExprKind::Array { type_ref, values } => Expr::new(
+            ExprKind::Array {
+                type_ref,
+                values: values
                     .into_iter()
                     .map(|item| resolve_signed_arg_placeholders(item, pubkey, signature))
                     .collect(),
-            ),
+            },
             span,
         ),
         other => Expr::new(other, span),
@@ -1790,7 +1913,7 @@ pub async fn cmd_deploy_covenant(
 
     let change = total_in - required;
     let source_spk = pay_to_address_script(&address);
-    let covenant_spk = pay_to_script_hash_script(&compiled.script);
+    let covenant_spk = pay_to_script_hash_script(&compiled.bytecode);
     let contract_address = extract_script_pub_key_address(&covenant_spk, address.prefix)
         .map_err(|err| format!("failed to derive contract address from locking script: {err}"))?;
 
