@@ -15,6 +15,9 @@ From `kascov/`:
 cargo run
 ```
 
+This branch requires Rust 1.94.0; the included `rust-toolchain.toml` makes
+`rustup` select it automatically.
+
 Dependencies are pulled via Cargo from git (including `silverscript-lang` and `argent`), so cloning `kascov/` alone is enough.
 
 
