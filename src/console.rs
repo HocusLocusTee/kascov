@@ -1800,7 +1800,7 @@ async fn cmd_console_with_inputs(
                     print_argent_help();
                     continue;
                 }
-                match parts.get(1).map(String::as_str) {
+                match parts.get(1).copied() {
                     Some("compile") if parts.len() == 3 || parts.len() == 4 => {
                         let source = parts[2];
                         let default_out;
@@ -1824,7 +1824,7 @@ async fn cmd_console_with_inputs(
                             }
                         };
                         let build_dir = default_argent_build_dir(source, &out_dir);
-                        let contract = parts.get(4).map(String::as_str);
+                        let contract = parts.get(4).copied();
                         if let Err(err) = cmd_deploy_argent(
                             &rpc,
                             &private_key,
